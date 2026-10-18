@@ -19,6 +19,10 @@ const PEER_PREFIX = 'batalla-naval-v1-';
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const CODE_LENGTH = 5;
 const CONNECT_TIMEOUT_MS = 15000;
+// Quien se une sigue buscando la partida durante este tiempo (por si el anfitrión
+// cambió de app en el celular y perdió un rato la conexión con el servidor).
+const JOIN_WINDOW_MS = 120000;
+const RETRY_MS = 3000;
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -64,7 +68,7 @@ const S = {
   code: null,
   myName: '',
   enemyName: 'Rival',
-  phase: 'lobby', // lobby | waiting | placing | playing | over | closed
+  phase: 'lobby', // lobby | joining | waiting | placing | playing | over | closed
   ships: [], // { id, name, size, cells: [{x, y}], hits }
   horizontal: true,
   selected: 0, // índice en FLEET del barco a ubicar, -1 si no hay
@@ -81,6 +85,9 @@ const S = {
   rematchMe: false,
   rematchEnemy: false,
   connectTimer: null,
+  retryTimer: null,
+  joinDeadline: 0,
+  joinFailure: '',
 };
 
 // ---------------------------------------------------------------------------
@@ -95,7 +102,9 @@ const els = {
   joinCode: $('#join-code'),
   btnJoin: $('#btn-join'),
   lobbyMsg: $('#lobby-msg'),
+  btnLobbyCancel: $('#btn-lobby-cancel'),
   codeDisplay: $('#code-display'),
+  waitingNote: $('#waiting-note'),
   btnCopy: $('#btn-copy'),
   btnShare: $('#btn-share'),
   btnCancel: $('#btn-cancel'),
@@ -138,6 +147,7 @@ function lobbyMsg(text, isError = false) {
 function setLobbyBusy(busy) {
   els.btnCreate.disabled = busy;
   els.btnJoin.disabled = busy;
+  els.btnLobbyCancel.hidden = !busy;
 }
 
 function showOverlay(title, text, actions) {
@@ -697,6 +707,9 @@ function createGame(attempt = 0) {
 
   peer.on('open', () => {
     if (S.peer !== peer) return;
+    clearTimeout(S.retryTimer);
+    els.waitingNote.textContent = 'Esperando que se una…';
+    if (S.phase === 'waiting') return; // reconexión: seguimos con el mismo código
     S.code = code;
     S.phase = 'waiting';
     els.codeDisplay.textContent = code;
@@ -706,7 +719,7 @@ function createGame(attempt = 0) {
   });
   peer.on('connection', (conn) => {
     if (S.peer !== peer) return;
-    if (S.conn) {
+    if (S.conn && S.conn.open) {
       // Ya hay dos jugadores: rechaza a cualquier otro.
       conn.on('open', () => {
         conn.send({ type: 'full' });
@@ -714,14 +727,26 @@ function createGame(attempt = 0) {
       });
       return;
     }
+    // Un intento anterior que nunca terminó de conectar se descarta.
+    const stale = S.conn;
+    S.conn = null;
+    try { stale?.close(); } catch { /* ya cerrada */ }
     attachConn(conn);
   });
   peer.on('disconnected', () => {
-    // Se cayó el servidor de señalización: mientras esperamos, hay que reconectar.
-    if (S.peer === peer && S.phase === 'waiting' && !peer.destroyed) peer.reconnect();
+    // Se cortó el servidor de señalización (típico al cambiar de app en el celular):
+    // mientras esperamos al rival hay que reconectar con el mismo código.
+    if (S.peer !== peer || S.phase !== 'waiting') return;
+    els.waitingNote.textContent = 'Reconectando…';
+    scheduleRetry(reconnectHost, 1000);
   });
   peer.on('error', (err) => {
     if (S.peer !== peer) return;
+    if (S.phase === 'waiting') {
+      console.warn('PeerJS', err.type, err);
+      scheduleRetry(reconnectHost, RETRY_MS);
+      return;
+    }
     if (err.type === 'unavailable-id' && attempt < 3) {
       createGame(attempt + 1);
       return;
@@ -729,6 +754,24 @@ function createGame(attempt = 0) {
     handlePeerError(err);
   });
 }
+
+function scheduleRetry(fn, delay) {
+  clearTimeout(S.retryTimer);
+  S.retryTimer = setTimeout(fn, delay);
+}
+
+function reconnectHost() {
+  const peer = S.peer;
+  if (S.role !== 'host' || S.phase !== 'waiting' || !peer || peer.destroyed || !peer.disconnected) return;
+  els.waitingNote.textContent = 'Reconectando…';
+  peer.reconnect();
+}
+
+// Al volver a la pestaña o recuperar internet, reintenta en el acto.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') reconnectHost();
+});
+window.addEventListener('online', reconnectHost);
 
 function joinGame(raw) {
   if (!peerAvailable()) return;
@@ -740,23 +783,78 @@ function joinGame(raw) {
   teardown();
   S.role = 'guest';
   S.code = code;
+  S.phase = 'joining';
   S.myName = myName();
+  S.joinDeadline = Date.now() + JOIN_WINDOW_MS;
+  S.joinFailure = 'network';
   setLobbyBusy(true);
   lobbyMsg('Conectando…');
 
   const peer = new Peer();
   S.peer = peer;
   peer.on('open', () => {
-    if (S.peer !== peer) return;
-    const conn = peer.connect(PEER_PREFIX + code, { reliable: true });
-    attachConn(conn);
-    S.connectTimer = setTimeout(() => {
-      if (S.conn === conn && !conn.open) failToLobby('No se pudo conectar. Revisá el código o probá de nuevo.');
-    }, CONNECT_TIMEOUT_MS);
+    if (S.peer === peer) tryConnect();
+  });
+  peer.on('disconnected', () => {
+    if (S.peer === peer && S.phase === 'joining') retryJoin('Reconectando con el servidor…');
   });
   peer.on('error', (err) => {
-    if (S.peer === peer) handlePeerError(err);
+    if (S.peer !== peer) return;
+    if (S.phase !== 'joining') {
+      handlePeerError(err);
+      return;
+    }
+    console.warn('PeerJS', err.type, err);
+    if (err.type === 'browser-incompatible') {
+      handlePeerError(err);
+    } else if (err.type === 'peer-unavailable') {
+      S.joinFailure = 'not-found';
+      retryJoin('Buscando la partida… Si tu amigo cambió de app, pedile que vuelva a la pantalla del código.');
+    } else {
+      retryJoin('Reconectando con el servidor…');
+    }
   });
+}
+
+function tryConnect() {
+  const peer = S.peer;
+  if (S.phase !== 'joining' || !peer || peer.destroyed || peer.disconnected) return;
+  const stale = S.conn;
+  S.conn = null;
+  try { stale?.close(); } catch { /* ya cerrada */ }
+  const conn = peer.connect(PEER_PREFIX + S.code, { reliable: true });
+  attachConn(conn);
+  clearTimeout(S.connectTimer);
+  S.connectTimer = setTimeout(() => {
+    if (S.conn !== conn || conn.open) return;
+    // Si el anfitrión llegó a responder, la partida existe y el problema es la red.
+    if (conn.peerConnection?.remoteDescription) {
+      S.joinFailure = 'p2p';
+      retryJoin('Encontramos la partida pero cuesta conectar. Reintentando…');
+    } else {
+      S.joinFailure = 'not-found';
+      retryJoin('Buscando la partida… Si tu amigo cambió de app, pedile que vuelva a la pantalla del código.');
+    }
+  }, CONNECT_TIMEOUT_MS);
+}
+
+function retryJoin(message) {
+  if (S.phase !== 'joining') return;
+  if (Date.now() > S.joinDeadline) {
+    failToLobby({
+      'not-found': 'No encontramos la partida. Revisá el código y que tu amigo tenga abierta la pantalla con el código.',
+      p2p: 'Encontramos la partida pero no se pudo conectar. Puede ser la red (wifi del trabajo, datos móviles): probá con otra conexión.',
+      network: 'No se pudo contactar al servidor de conexión. Revisá tu internet y probá de nuevo.',
+    }[S.joinFailure]);
+    return;
+  }
+  lobbyMsg(message);
+  scheduleRetry(() => {
+    const peer = S.peer;
+    if (S.phase !== 'joining' || !peer || peer.destroyed) return;
+    if (peer.disconnected) peer.reconnect(); // al abrir, 'open' vuelve a llamar a tryConnect
+    else tryConnect();
+  }, RETRY_MS);
 }
 
 function attachConn(conn) {
@@ -764,6 +862,7 @@ function attachConn(conn) {
   conn.on('open', () => {
     if (S.conn !== conn) return;
     clearTimeout(S.connectTimer);
+    clearTimeout(S.retryTimer);
     conn.send({ type: 'hello', name: S.myName });
     enterGame();
   });
@@ -833,7 +932,8 @@ function onData(msg) {
 
 function handlePeerError(err) {
   console.warn('PeerJS', err.type, err);
-  const inGame = S.conn && S.conn.open;
+  // Con los dos jugadores ya conectados, el servidor de señalización no hace falta.
+  if (S.conn && S.conn.open) return;
   switch (err.type) {
     case 'peer-unavailable':
       failToLobby('No existe ninguna partida con ese código (o ya terminó).');
@@ -845,16 +945,15 @@ function handlePeerError(err) {
     case 'server-error':
     case 'socket-error':
     case 'socket-closed':
-      // Si ya estamos conectados entre pares, el servidor no hace falta.
-      if (!inGame) failToLobby('No se pudo contactar al servidor de conexión. Probá de nuevo en un rato.');
+      failToLobby('No se pudo contactar al servidor de conexión. Revisá tu internet y probá de nuevo.');
       break;
     default:
-      if (!inGame) failToLobby(`Error de conexión (${err.type || 'desconocido'}).`);
+      failToLobby(`Error de conexión (${err.type || 'desconocido'}).`);
   }
 }
 
 function onDisconnected() {
-  if (['lobby', 'waiting', 'closed'].includes(S.phase)) return;
+  if (['lobby', 'joining', 'waiting', 'closed'].includes(S.phase)) return;
   const wasOver = S.phase === 'over';
   S.phase = 'closed';
   const enemy = S.enemyName;
@@ -869,6 +968,7 @@ function onDisconnected() {
 
 function teardown({ keepState = false } = {}) {
   clearTimeout(S.connectTimer);
+  clearTimeout(S.retryTimer);
   const { conn, peer } = S;
   S.conn = null;
   S.peer = null;
@@ -928,6 +1028,7 @@ els.joinCode.addEventListener('input', () => {
   els.joinCode.value = normalizeCode(els.joinCode.value);
 });
 els.btnCancel.addEventListener('click', leave);
+els.btnLobbyCancel.addEventListener('click', leave);
 
 els.btnCopy.addEventListener('click', async () => {
   const link = inviteLink();

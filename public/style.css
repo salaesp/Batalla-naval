@@ -116,6 +116,8 @@ kbd {
 .msg.error { color: var(--danger); }
 
 #waiting { padding-top: 48px; }
+.hint { margin: 0; font-size: .85rem; color: var(--muted); opacity: .8; }
+#btn-lobby-cancel { align-self: center; }
 .code {
   font-size: clamp(2.4rem, 12vw, 3.5rem);
   font-weight: 800;

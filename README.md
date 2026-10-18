@@ -51,6 +51,7 @@ Abrí `http://localhost:8000` en dos pestañas (o en dos dispositivos de la mism
 
 ## Notas
 
+- Quien crea la partida tiene que volver a la pantalla del código después de mandarlo (en el celular, al cambiar de app se corta la conexión con el servidor). El juego se reconecta solo con el mismo código, y quien se une sigue buscando la partida hasta 2 minutos.
 - Si un jugador recarga la página o cierra la pestaña, la partida se corta y hay que crear una nueva.
 - En algunas redes muy restrictivas (redes corporativas o ciertos datos móviles) WebRTC puede no lograr conectar. PeerJS ya incluye servidores STUN/TURN públicos para la mayoría de los casos.
 - Si en algún momento querés no depender del servidor público de PeerJS, se puede levantar uno propio con [`peerjs-server`](https://github.com/peers/peerjs-server) y pasarle `host`/`port` al `new Peer(...)` en `public/game.js`.

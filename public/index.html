@@ -29,6 +29,7 @@
           <button type="submit" id="btn-join">Unirse</button>
         </form>
         <p id="lobby-msg" class="msg" role="status"></p>
+        <button id="btn-lobby-cancel" class="ghost small" hidden>Cancelar</button>
       </div>
     </section>
 
@@ -41,7 +42,8 @@
           <button id="btn-copy">Copiar link</button>
           <button id="btn-share" hidden>Compartir…</button>
         </div>
-        <p class="muted"><span class="spinner"></span> Esperando que se una…</p>
+        <p class="muted"><span class="spinner"></span> <span id="waiting-note">Esperando que se una…</span></p>
+        <p class="hint">Dejá esta pantalla abierta hasta que tu amigo entre. Si cambiás de app para mandar el código, volvé acá.</p>
         <button id="btn-cancel" class="ghost">Cancelar</button>
       </div>
     </section>
