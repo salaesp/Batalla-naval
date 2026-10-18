@@ -8,7 +8,6 @@
   <meta name="theme-color" content="#0b1d2e">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚓</text></svg>">
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js" defer></script>
   <script src="game.js" defer></script>
 </head>
 <body>
@@ -43,7 +42,7 @@
           <button id="btn-share" hidden>Compartir…</button>
         </div>
         <p class="muted"><span class="spinner"></span> <span id="waiting-note">Esperando que se una…</span></p>
-        <p class="hint">Dejá esta pantalla abierta hasta que tu amigo entre. Si cambiás de app para mandar el código, volvé acá.</p>
+        <p class="hint">Cuando tu amigo entre, la partida arranca sola. Podés cambiar de app para mandarle el código; sólo no cierres esta pestaña.</p>
         <button id="btn-cancel" class="ghost">Cancelar</button>
       </div>
     </section>
@@ -54,6 +53,7 @@
         <div class="vs"><strong id="vs"></strong> <span class="muted">· Partida <span id="game-code"></span></span></div>
         <button id="btn-leave" class="ghost small">Salir</button>
       </div>
+      <p id="net-banner" class="net-banner" role="alert" hidden></p>
       <p id="status" class="status" role="status" aria-live="polite"></p>
 
       <div id="placement" class="panel">

@@ -151,6 +151,15 @@ kbd {
   border: 1px solid var(--line);
   min-height: 1.4em;
 }
+.net-banner {
+  margin: 12px 0 0;
+  padding: 8px 14px;
+  border-radius: 12px;
+  background: rgba(255, 122, 102, .12);
+  border: 1px solid var(--danger);
+  font-size: .9rem;
+}
+
 .status.my-turn { border-color: var(--accent); background: rgba(255, 201, 74, .1); }
 
 .panel { margin-bottom: 16px; }
