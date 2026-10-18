@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Batalla Naval</title>
+  <meta name="description" content="Batalla naval online para jugar con un amigo: creá una partida y compartí el código.">
+  <meta name="theme-color" content="#0b1d2e">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚓</text></svg>">
+  <link rel="stylesheet" href="style.css">
+  <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js" defer></script>
+  <script src="game.js" defer></script>
+</head>
+<body>
+  <main>
+    <!-- Inicio -->
+    <section id="lobby" class="screen">
+      <header class="hero">
+        <h1>⚓ Batalla Naval</h1>
+        <p>Creá una partida, pasale el código a un amigo y ¡a hundir barcos!</p>
+      </header>
+      <div class="card">
+        <label for="name">Tu nombre</label>
+        <input id="name" maxlength="20" placeholder="Capitán" autocomplete="nickname">
+        <button id="btn-create" class="primary big">Crear partida</button>
+        <div class="sep"><span>o unite con un código</span></div>
+        <form id="join-form" class="row">
+          <input id="join-code" class="code-input" maxlength="5" placeholder="CÓDIGO" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Código de partida">
+          <button type="submit" id="btn-join">Unirse</button>
+        </form>
+        <p id="lobby-msg" class="msg" role="status"></p>
+      </div>
+    </section>
+
+    <!-- Esperando rival -->
+    <section id="waiting" class="screen" hidden>
+      <div class="card center">
+        <p>Compartí este código con tu amigo:</p>
+        <div id="code-display" class="code">-----</div>
+        <div class="row center">
+          <button id="btn-copy">Copiar link</button>
+          <button id="btn-share" hidden>Compartir…</button>
+        </div>
+        <p class="muted"><span class="spinner"></span> Esperando que se una…</p>
+        <button id="btn-cancel" class="ghost">Cancelar</button>
+      </div>
+    </section>
+
+    <!-- Partida -->
+    <section id="game" class="screen" hidden>
+      <div class="topbar">
+        <div class="vs"><strong id="vs"></strong> <span class="muted">· Partida <span id="game-code"></span></span></div>
+        <button id="btn-leave" class="ghost small">Salir</button>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+
+      <div id="placement" class="panel">
+        <ul id="ship-list" class="ship-list"></ul>
+        <div class="row wrap">
+          <button id="btn-rotate">↻ Rotar <kbd>R</kbd></button>
+          <button id="btn-random">🎲 Al azar</button>
+          <button id="btn-clear" class="ghost">Limpiar</button>
+          <button id="btn-ready" class="primary" disabled>¡Listo!</button>
+        </div>
+      </div>
+
+      <div id="end-actions" class="panel row wrap center" hidden>
+        <button id="btn-rematch" class="primary">Revancha</button>
+        <button id="btn-home" class="ghost">Volver al inicio</button>
+      </div>
+
+      <div id="boards" class="boards">
+        <div class="board-wrap" id="my-wrap">
+          <h2>Tu flota</h2>
+          <div id="my-board" class="board"></div>
+        </div>
+        <div class="board-wrap" id="enemy-wrap">
+          <h2>Flota enemiga</h2>
+          <div id="enemy-board" class="board"></div>
+          <ul id="enemy-fleet" class="fleet-status"></ul>
+        </div>
+      </div>
+
+      <div class="chat">
+        <div id="chat-log" class="chat-log" aria-live="polite"></div>
+        <form id="chat-form" class="row">
+          <input id="chat-input" maxlength="200" placeholder="Escribile a tu rival…" autocomplete="off" aria-label="Mensaje">
+          <button type="submit">Enviar</button>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <div id="overlay" class="overlay" hidden>
+    <div class="card center" role="dialog" aria-modal="true" aria-labelledby="overlay-title">
+      <h2 id="overlay-title"></h2>
+      <p id="overlay-text"></p>
+      <div id="overlay-actions" class="row wrap center"></div>
+    </div>
+  </div>
+</body>
+</html>
