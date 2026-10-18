@@ -93,6 +93,7 @@ const S = {
   lastEvent: '',
   rematchMe: false,
   rematchEnemy: false,
+  unread: 0, // mensajes del rival sin leer con el chat cerrado (celular)
 };
 
 // ---------------------------------------------------------------------------
@@ -132,6 +133,13 @@ const els = {
   enemyBoard: $('#enemy-board'),
   enemyWrap: $('#enemy-wrap'),
   enemyFleet: $('#enemy-fleet'),
+  myWrap: $('#my-wrap'),
+  btnMini: $('#btn-mini'),
+  scrim: $('#scrim'),
+  chat: $('#chat'),
+  btnChat: $('#btn-chat'),
+  btnChatClose: $('#btn-chat-close'),
+  chatBadge: $('#chat-badge'),
   chatLog: $('#chat-log'),
   chatForm: $('#chat-form'),
   chatInput: $('#chat-input'),
@@ -419,6 +427,9 @@ function render() {
   els.btnRematch.textContent = S.rematchEnemy ? 'Aceptar revancha' : 'Revancha';
   els.enemyWrap.classList.toggle('inactive', placing);
   els.boards.classList.toggle('playing', S.phase === 'playing');
+  const battle = S.phase === 'playing' || S.phase === 'over';
+  els.screens.game.classList.toggle('battle', battle);
+  if (!battle) zoomMyBoard(false);
   els.btnReady.disabled = !allPlaced();
 
   renderShipList();
@@ -433,6 +444,35 @@ function updateTitle() {
   document.title = myTurn && document.hidden ? '🎯 ¡Tu turno! · Batalla Naval' : 'Batalla Naval';
 }
 document.addEventListener('visibilitychange', updateTitle);
+
+// En el celular, durante la batalla tu flota es un mini-radar (ver style.css).
+// Para mostrarla en grande se la escala hasta el centro de la pantalla.
+const mobile = matchMedia('(max-width: 899px)');
+let zoomTimer = 0;
+
+function zoomMyBoard(on, autoCloseMs = 0) {
+  clearTimeout(zoomTimer);
+  const wrap = els.myWrap;
+  if (on && !(mobile.matches && els.screens.game.classList.contains('battle'))) on = false;
+  if (on && !wrap.classList.contains('zoom')) {
+    const r = wrap.getBoundingClientRect();
+    const scale = Math.min((innerWidth - 32) / r.width, (innerHeight * 0.75) / r.height);
+    const dx = (innerWidth - r.width * scale) / 2 - r.left;
+    const dy = (innerHeight - r.height * scale) / 2 - r.top;
+    wrap.style.transform = `translate(${dx}px, ${dy}px) scale(${scale})`;
+  } else if (!on) {
+    wrap.style.transform = '';
+  }
+  wrap.classList.toggle('zoom', on);
+  els.scrim.classList.toggle('on', on);
+  els.btnMini.setAttribute('aria-label', on ? 'Achicar tu flota' : 'Ver tu flota en grande');
+  if (on && autoCloseMs) zoomTimer = setTimeout(() => zoomMyBoard(false), autoCloseMs);
+}
+
+els.btnMini.addEventListener('click', () => zoomMyBoard(!els.myWrap.classList.contains('zoom')));
+els.scrim.addEventListener('click', () => zoomMyBoard(false));
+addEventListener('resize', () => zoomMyBoard(false));
+mobile.addEventListener('change', () => zoomMyBoard(false));
 
 function boom(cell) {
   cell.classList.remove('boom');
@@ -569,6 +609,8 @@ function handleShot(msg) {
   } else {
     S.myTurn = true;
     render();
+    // Mostrar un momento dónde cayó el tiro antes de que te toque disparar.
+    zoomMyBoard(true, 1600);
   }
   boom(myCells[y][x]);
 }
@@ -668,7 +710,30 @@ function addChat(author, text, mine = false) {
   }
   els.chatLog.append(p);
   els.chatLog.scrollTop = els.chatLog.scrollHeight;
+  if (author !== null && !mine && !els.chat.classList.contains('open')) {
+    S.unread++;
+    renderChatBadge();
+  }
 }
+
+// En el celular el chat es un panel que se abre con el botón flotante.
+function openChat(open) {
+  els.chat.classList.toggle('open', open);
+  els.btnChat.setAttribute('aria-expanded', String(open));
+  if (open) {
+    S.unread = 0;
+    renderChatBadge();
+    els.chatLog.scrollTop = els.chatLog.scrollHeight;
+  }
+}
+
+function renderChatBadge() {
+  els.chatBadge.hidden = S.unread === 0;
+  els.chatBadge.textContent = S.unread > 9 ? '9+' : String(S.unread);
+}
+
+els.btnChat.addEventListener('click', () => openChat(!els.chat.classList.contains('open')));
+els.btnChatClose.addEventListener('click', () => openChat(false));
 
 els.chatForm.addEventListener('submit', (e) => {
   e.preventDefault();
@@ -888,6 +953,9 @@ function enterGame() {
   setLobbyBusy(false);
   lobbyMsg('');
   els.chatLog.replaceChildren();
+  S.unread = 0;
+  renderChatBadge();
+  openChat(false);
   showScreen('game');
   resetRound();
   send({ type: 'hello', name: S.myName });

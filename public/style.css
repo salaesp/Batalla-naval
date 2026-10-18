@@ -289,10 +289,6 @@ kbd {
 .fleet-status li.sunk { opacity: .5; text-decoration: line-through; }
 .fleet-status li.sunk .pips i { background: var(--hit); }
 
-/* Durante la partida en pantallas chicas, el tablero enemigo va primero */
-@media (max-width: 899px) {
-  .boards.playing #enemy-wrap { order: -1; }
-}
 
 /* Chat */
 .chat { margin-top: 24px; max-width: 600px; margin-left: auto; margin-right: auto; }
@@ -313,6 +309,119 @@ kbd {
 .chat form { margin-top: -1px; }
 .chat input { flex: 1; border-radius: 0 0 0 12px; }
 .chat button { border-radius: 0 0 12px 0; }
+
+/* Sólo para celular (ver más abajo) */
+.mini-hit, .scrim, .chat-fab, .chat-head { display: none; }
+
+/* Celular: durante la batalla el tablero enemigo ocupa todo el ancho y tu flota
+   queda como un mini-radar al lado del estado. Cuando el rival dispara (o al
+   tocarlo) el radar se agranda en el centro un momento. */
+@media (max-width: 899px) {
+  /* «dense» hace que el radar (col. 2) se acomode al lado del estado. */
+  #game.battle { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-auto-flow: row dense; column-gap: 12px; }
+  #game.battle > * { grid-column: 1 / -1; }
+  #game.battle > .status { grid-column: 1; align-self: start; }
+  #game.battle .boards { display: contents; }
+  #game.battle #enemy-wrap { grid-column: 1 / -1; }
+
+  #game.battle #my-wrap {
+    grid-column: 2;
+    --cell: 11px;
+    --gap: 1px;
+    position: relative;
+    z-index: 20;
+    margin: 12px 0;
+    padding: 6px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    align-self: start;
+    transform-origin: 0 0;
+    transition: transform .45s cubic-bezier(.3, .7, .2, 1), box-shadow .45s, border-color .45s;
+  }
+  #game.battle #my-wrap h2 { font-size: .7rem; margin-bottom: 4px; align-self: flex-start; }
+  #game.battle #my-wrap .board { grid-template-columns: repeat(10, var(--cell)); padding: 0; border: 0; }
+  #game.battle #my-wrap .label { display: none; }
+  #game.battle #my-wrap .cell { border-radius: 2px; pointer-events: none; }
+  #game.battle #my-wrap .mini-hit {
+    display: block;
+    position: absolute;
+    inset: 0;
+    background: transparent;
+    border: 0;
+    border-radius: inherit;
+    padding: 0;
+    cursor: zoom-in;
+  }
+  #game.battle #my-wrap.zoom { border-color: var(--accent); box-shadow: 0 20px 50px rgba(0, 0, 0, .6); }
+  #game.battle #my-wrap.zoom .mini-hit { cursor: zoom-out; }
+
+  .scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 15;
+    border: 0;
+    border-radius: 0;
+    padding: 0;
+    background: rgba(3, 10, 18, .65);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .35s;
+  }
+  .scrim.on { opacity: 1; pointer-events: auto; }
+  .scrim:hover:not(:disabled) { background: rgba(3, 10, 18, .65); }
+
+  /* Chat: botón flotante y panel desde abajo */
+  .chat-fab {
+    display: grid;
+    place-items: center;
+    position: relative;
+    width: 40px;
+    height: 36px;
+    padding: 0;
+  }
+  .chat-badge {
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 5px;
+    border-radius: 10px;
+    background: var(--accent);
+    color: #1a1300;
+    font-size: 12px;
+    font-weight: 700;
+    display: grid;
+    place-items: center;
+  }
+  .chat {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+    margin: 0;
+    max-width: none;
+    padding: 12px 16px calc(16px + env(safe-area-inset-bottom));
+    background: var(--card);
+    border-top: 1px solid var(--line);
+    border-radius: 16px 16px 0 0;
+    box-shadow: 0 -10px 30px rgba(0, 0, 0, .4);
+    transform: translateY(100%);
+    visibility: hidden;
+    transition: transform .3s ease, visibility 0s .3s;
+  }
+  .chat.open { transform: none; visibility: visible; transition: transform .3s ease; }
+  .chat-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .chat-log { max-height: 40vh; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #game.battle #my-wrap, .scrim, .chat { transition: none !important; }
+  .cell.boom { animation: none; }
+}
 
 /* Overlay */
 .overlay {
