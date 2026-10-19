@@ -227,7 +227,8 @@ kbd {
   cursor: default;
   transition: background .1s;
 }
-.cell:hover:not(:disabled) { background: var(--water); }
+.cell:hover:not(:disabled):not(.ship) { background: var(--water); }
+.cell.ship:hover:not(:disabled) { background: var(--ship); }
 .cell:disabled { opacity: 1; cursor: default; }
 .cell.target { cursor: crosshair; }
 .cell.target:hover { background: var(--water-hover) !important; box-shadow: inset 0 0 0 2px var(--accent); }
@@ -239,7 +240,9 @@ kbd {
 .cell.ship.stern.v { border-radius: 4px 4px 40% 40%; }
 
 .cell.placing { cursor: pointer; }
-.cell.placing.ship { cursor: grab; }
+.cell.placing.ship { cursor: grab; touch-action: none; }
+.cell.placing.ship.active { background: #c9d4de; box-shadow: inset 0 0 0 2px var(--accent); }
+.cell.lifted { opacity: .35; }
 .cell.preview { background: rgba(255, 201, 74, .75) !important; }
 .cell.preview-bad { background: rgba(255, 90, 60, .6) !important; }
 
@@ -322,6 +325,11 @@ kbd {
   #game.battle > * { grid-column: 1 / -1; }
   #game.battle > .status { grid-column: 1; align-self: start; }
   #game.battle .boards { display: contents; }
+  /* Mientras ubicás los barcos el tablero enemigo no sirve: se oculta, y los
+     controles van debajo de tu tablero para que se vea junto con las indicaciones. */
+  #game:not(.battle) { display: flex; flex-direction: column; }
+  #game:not(.battle) #enemy-wrap.inactive { display: none; }
+  #game:not(.battle) #placement { order: 1; margin: 12px 0 0; }
   #game.battle #enemy-wrap { grid-column: 1 / -1; }
 
   #game.battle #my-wrap {

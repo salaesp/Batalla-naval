@@ -81,7 +81,10 @@ const S = {
   ships: [], // { id, name, size, cells: [{x, y}], hits }
   horizontal: true,
   selected: 0, // índice en FLEET del barco a ubicar, -1 si no hay
-  hover: null,
+  hover: null, // casilla bajo el mouse (sólo con mouse) para previsualizar el próximo barco
+  active: null, // id del barco ya puesto que está marcado (el último puesto, girado o movido)
+  drag: null, // barco que se está arrastrando: { id, grab, start, cells, ok }
+  flash: null, // { cells, msg } cuando algo no entra, se borra solo
   incoming: new Map(), // disparos recibidos: key -> 'hit' | 'miss'
   outgoing: new Map(), // disparos hechos: key -> 'hit' | 'miss' | 'sunk'
   revealed: new Set(), // barcos del rival mostrados al terminar
@@ -282,19 +285,119 @@ function buildBoard(container, onCell) {
 const myCells = buildBoard(els.myBoard, onMyBoardClick);
 const enemyCells = buildBoard(els.enemyBoard, shoot);
 
-els.myBoard.addEventListener('mouseover', (e) => {
-  const b = e.target.closest('.cell');
-  if (!b || S.phase !== 'placing') return;
-  S.hover = { x: Number(b.dataset.x), y: Number(b.dataset.y) };
+// Ubicación con mouse o dedo: tocar una casilla vacía pone el próximo barco,
+// tocar un barco puesto lo gira, y arrastrarlo lo mueve.
+let suppressClick = false;
+
+function cellFromPoint(e) {
+  const b = document.elementFromPoint(e.clientX, e.clientY)?.closest('#my-board .cell');
+  return b ? { x: Number(b.dataset.x), y: Number(b.dataset.y) } : null;
+}
+
+function canEditFleet() {
+  return S.phase === 'placing' && !S.myReady;
+}
+
+els.myBoard.addEventListener('pointerdown', (e) => {
+  if (!canEditFleet() || e.button > 0) return;
+  const c = cellFromPoint(e);
+  const ship = c && shipAt(c.x, c.y);
+  if (!ship) return;
+  const grab = ship.cells.findIndex((p) => p.x === c.x && p.y === c.y);
+  S.drag = { id: ship.id, grab, start: c, at: c, cells: ship.cells, ok: true };
+  els.myBoard.setPointerCapture(e.pointerId);
+});
+
+els.myBoard.addEventListener('pointermove', (e) => {
+  if (!canEditFleet()) return;
+  if (!S.drag) {
+    if (e.pointerType !== 'mouse') return;
+    const c = cellFromPoint(e);
+    if (c?.x !== S.hover?.x || c?.y !== S.hover?.y) {
+      S.hover = c;
+      renderMyBoard();
+    }
+    return;
+  }
+  const c = cellFromPoint(e);
+  if (!c || (c.x === S.drag.at.x && c.y === S.drag.at.y)) return;
+  const ship = S.ships.find((s) => s.id === S.drag.id);
+  const horizontal = isHorizontal(ship);
+  const ox = horizontal ? c.x - S.drag.grab : c.x;
+  const oy = horizontal ? c.y : c.y - S.drag.grab;
+  const cells = shipCells(
+    Math.max(0, Math.min(ox, horizontal ? SIZE - ship.size : SIZE - 1)),
+    Math.max(0, Math.min(oy, horizontal ? SIZE - 1 : SIZE - ship.size)),
+    ship.size, horizontal,
+  );
+  S.drag.at = c;
+  S.drag.cells = cells;
+  S.drag.ok = canPlace(cells, otherShips(ship));
   renderMyBoard();
 });
-els.myBoard.addEventListener('mouseleave', () => {
+
+els.myBoard.addEventListener('pointerup', (e) => {
+  if (!canEditFleet()) return;
+  suppressClick = true;
+  setTimeout(() => { suppressClick = false; });
+  const drag = S.drag;
+  S.drag = null;
+  clearFlash();
+  if (drag) {
+    const ship = S.ships.find((s) => s.id === drag.id);
+    const moved = drag.at.x !== drag.start.x || drag.at.y !== drag.start.y;
+    if (!moved) {
+      rotateShip(ship, drag.start);
+    } else if (drag.ok) {
+      ship.cells = drag.cells;
+      S.active = ship.id;
+      render();
+    } else {
+      flash(drag.cells, 'Ahí no entra: se pisa con otro barco.');
+    }
+    return;
+  }
+  const c = cellFromPoint(e);
+  if (c) placeNext(c.x, c.y);
+});
+
+els.myBoard.addEventListener('pointercancel', () => {
+  S.drag = null;
+  renderMyBoard();
+});
+
+els.myBoard.addEventListener('pointerleave', (e) => {
+  if (e.pointerType !== 'mouse' || !S.hover) return;
   S.hover = null;
   renderMyBoard();
 });
 
+function isHorizontal(ship) {
+  return ship.size === 1 || ship.cells[0].y === ship.cells[1].y;
+}
+
+function otherShips(ship) {
+  return S.ships.filter((s) => s !== ship);
+}
+
+let flashTimer = 0;
+function clearFlash() {
+  clearTimeout(flashTimer);
+  S.flash = null;
+}
+
+function flash(cells, msg) {
+  clearFlash();
+  S.flash = { cells, msg };
+  render();
+  flashTimer = setTimeout(() => {
+    S.flash = null;
+    render();
+  }, 1800);
+}
+
 function previewCells() {
-  if (S.phase !== 'placing' || S.myReady || !S.hover || S.selected < 0) return null;
+  if (!canEditFleet() || S.drag || !S.hover || S.selected < 0) return null;
   const f = FLEET[S.selected];
   if (shipAt(S.hover.x, S.hover.y)) return null;
   const cells = placementFor(S.hover.x, S.hover.y, f.size, S.horizontal);
@@ -302,8 +405,12 @@ function previewCells() {
 }
 
 function renderMyBoard() {
-  const placing = S.phase === 'placing' && !S.myReady;
-  const preview = previewCells();
+  const placing = canEditFleet();
+  let preview = previewCells();
+  if (S.drag && (S.drag.at.x !== S.drag.start.x || S.drag.at.y !== S.drag.start.y)) {
+    preview = { cells: S.drag.cells, ok: S.drag.ok };
+  }
+  if (S.flash) preview = { cells: S.flash.cells, ok: false };
   const previewKeys = new Set(preview ? preview.cells.map((c) => key(c.x, c.y)) : []);
   for (let y = 0; y < SIZE; y++) {
     for (let x = 0; x < SIZE; x++) {
@@ -316,6 +423,8 @@ function renderMyBoard() {
         if (i === 0) cls.push('bow');
         if (i === ship.size - 1) cls.push('stern');
         if (ship.hits === ship.size) cls.push('sunk');
+        if (placing && ship.id === S.active) cls.push('active');
+        if (placing && preview && S.drag?.id === ship.id) cls.push('lifted');
       }
       const shot = S.incoming.get(k);
       if (shot === 'hit' && !(ship && ship.hits === ship.size)) cls.push('hit');
@@ -368,8 +477,13 @@ function renderShipList() {
     name.textContent = f.name;
     li.append(name, pips(f.size));
     li.addEventListener('click', () => {
-      if (S.myReady || placed) return;
-      S.selected = i;
+      if (S.myReady) return;
+      // Un barco puesto queda marcado (para girarlo con el botón); uno sin poner pasa a ser el próximo.
+      if (placed) S.active = f.id;
+      else {
+        S.selected = i;
+        S.active = null;
+      }
       render();
     });
     return li;
@@ -393,13 +507,16 @@ function renderEnemyFleet() {
 function statusText() {
   const enemy = S.enemyName;
   switch (S.phase) {
-    case 'placing':
+    case 'placing': {
       if (S.myReady) return `Flota lista. Esperando a que ${enemy} ubique sus barcos…`;
-      if (allPlaced()) {
-        return `¡Flota ubicada! Tocá «¡Listo!» para empezar.${S.enemyReady ? ` ${enemy} ya está esperando.` : ''}`;
-      }
-      return `Ubicá tu ${FLEET[S.selected].name.toLowerCase()} (${FLEET[S.selected].size} casillas). ` +
-        'Tocá un barco ya puesto para moverlo.' + (S.enemyReady ? ` ${enemy} ya está esperando.` : '');
+      if (S.flash) return S.flash.msg;
+      const waiting = S.enemyReady ? ` ${enemy} ya está esperando.` : '';
+      const edit = S.ships.length ? ' Tocá un barco para girarlo o arrastralo para moverlo.' : '';
+      if (allPlaced()) return `¡Flota ubicada! Tocá «¡Listo!» para empezar.${edit}${waiting}`;
+      const f = FLEET[S.selected];
+      const dir = S.horizontal ? 'acostado →' : 'parado ↓';
+      return `Tocá el tablero para poner el ${f.name.toLowerCase()} (${f.size} casillas, ${dir}).${edit}${waiting}`;
+    }
     case 'playing': {
       const turn = S.myTurn ? '🎯 Tu turno: elegí dónde disparar.' : `⏳ Turno de ${enemy}…`;
       return S.lastEvent ? `${S.lastEvent} ${turn}` : turn;
@@ -484,29 +601,59 @@ function boom(cell) {
 // Ubicación de barcos
 // ---------------------------------------------------------------------------
 
+// Teclado (Enter/Espacio sobre una casilla): mismo comportamiento que tocar.
 function onMyBoardClick(x, y) {
-  if (S.phase !== 'placing' || S.myReady) return;
-  const existing = shipAt(x, y);
-  if (existing) {
-    // Levanta el barco para volver a ubicarlo.
-    S.ships = S.ships.filter((s) => s !== existing);
-    S.selected = FLEET.findIndex((f) => f.id === existing.id);
-    S.horizontal = existing.cells[0].y === existing.cells[existing.size - 1].y;
-    S.hover = { x, y };
-    render();
-    return;
-  }
-  if (S.selected < 0) return;
+  if (!canEditFleet() || suppressClick) return;
+  clearFlash();
+  const ship = shipAt(x, y);
+  if (ship) rotateShip(ship, { x, y });
+  else placeNext(x, y);
+}
+
+function placeNext(x, y) {
+  if (!canEditFleet() || S.selected < 0 || shipAt(x, y)) return;
   const f = FLEET[S.selected];
   const cells = placementFor(x, y, f.size, S.horizontal);
-  if (!canPlace(cells)) return;
+  if (!canPlace(cells)) {
+    flash(cells, `El ${f.name.toLowerCase()} no entra ahí. Probá en otro lugar o girá con «↻ Girar».`);
+    return;
+  }
   S.ships.push({ ...f, cells, hits: 0 });
+  S.active = f.id;
   S.selected = nextUnplaced();
+  S.hover = null;
   render();
 }
 
+// Gira un barco ya puesto alrededor de la casilla tocada. Si no entra así,
+// prueba corriéndolo a lo largo de la nueva dirección.
+function rotateShip(ship, pivot = ship.cells[0]) {
+  const horizontal = !isHorizontal(ship);
+  const at = Math.max(0, ship.cells.findIndex((c) => c.x === pivot.x && c.y === pivot.y));
+  const order = [...Array(ship.size).keys()].sort((a, b) => Math.abs(a - at) - Math.abs(b - at));
+  for (const i of order) {
+    const cells = shipCells(horizontal ? pivot.x - i : pivot.x, horizontal ? pivot.y : pivot.y - i, ship.size, horizontal);
+    if (canPlace(cells, otherShips(ship))) {
+      ship.cells = cells;
+      S.active = ship.id;
+      S.horizontal = horizontal;
+      render();
+      return;
+    }
+  }
+  S.active = ship.id;
+  flash(placementFor(pivot.x, pivot.y, ship.size, horizontal), 'No hay lugar para girarlo ahí. Arrastralo a otro lado.');
+}
+
+// El botón gira el barco marcado; si no hay, cambia la dirección del próximo.
 function rotate() {
-  if (S.phase !== 'placing' || S.myReady) return;
+  if (!canEditFleet()) return;
+  clearFlash();
+  const ship = S.ships.find((s) => s.id === S.active);
+  if (ship) {
+    rotateShip(ship, ship.cells[Math.floor((ship.size - 1) / 2)]);
+    return;
+  }
   S.horizontal = !S.horizontal;
   render();
 }
@@ -516,12 +663,16 @@ els.btnRandom.addEventListener('click', () => {
   if (S.myReady) return;
   S.ships = randomFleet();
   S.selected = -1;
+  S.active = null;
+  clearFlash();
   render();
 });
 els.btnClear.addEventListener('click', () => {
   if (S.myReady) return;
   S.ships = [];
   S.selected = 0;
+  S.active = null;
+  clearFlash();
   render();
 });
 els.btnReady.addEventListener('click', () => {
@@ -545,6 +696,9 @@ function resetRound() {
   S.horizontal = true;
   S.selected = 0;
   S.hover = null;
+  S.active = null;
+  S.drag = null;
+  clearFlash();
   S.incoming.clear();
   S.outgoing.clear();
   S.revealed.clear();
