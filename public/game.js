@@ -96,6 +96,7 @@ const S = {
   lastEvent: '',
   rematchMe: false,
   rematchEnemy: false,
+  askName: false, // llegó por link sin nombre guardado: se pregunta al entrar y recién ahí se manda el «hello»
   unread: 0, // mensajes del rival sin leer con el chat cerrado (celular)
 };
 
@@ -117,7 +118,12 @@ const els = {
   btnCopy: $('#btn-copy'),
   btnShare: $('#btn-share'),
   btnCancel: $('#btn-cancel'),
-  vs: $('#vs'),
+  btnName: $('#btn-name'),
+  enemyName: $('#enemy-name'),
+  chatToast: $('#chat-toast'),
+  nameDialog: $('#name-dialog'),
+  nameForm: $('#name-form'),
+  nameEdit: $('#name-edit'),
   gameCode: $('#game-code'),
   btnLeave: $('#btn-leave'),
   netBanner: $('#net-banner'),
@@ -532,7 +538,8 @@ function statusText() {
 
 function render() {
   if (S.phase === 'lobby' || S.phase === 'waiting') return;
-  els.vs.textContent = `${S.myName} vs. ${S.enemyName}`;
+  els.btnName.textContent = S.myName;
+  els.enemyName.textContent = S.enemyName;
   els.gameCode.textContent = S.code;
   els.status.textContent = statusText();
   els.status.classList.toggle('my-turn', S.phase === 'playing' && S.myTurn);
@@ -881,14 +888,35 @@ function addChat(author, text, mine = false) {
   if (author !== null && !mine && !els.chat.classList.contains('open')) {
     S.unread++;
     renderChatBadge();
+    showChatToast(author, text);
   }
 }
+
+// En el celular, un aviso chiquito abajo con el mensaje; se va solo y al tocarlo abre el chat.
+let toastTimer = 0;
+function showChatToast(author, text) {
+  if (!mobile.matches) return;
+  const b = document.createElement('b');
+  b.textContent = `${author}: `;
+  els.chatToast.replaceChildren(b, document.createTextNode(text));
+  els.chatToast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(hideChatToast, 3500);
+}
+
+function hideChatToast() {
+  clearTimeout(toastTimer);
+  els.chatToast.hidden = true;
+}
+
+els.chatToast.addEventListener('click', () => openChat(true));
 
 // En el celular el chat es un panel que se abre con el botón flotante.
 function openChat(open) {
   els.chat.classList.toggle('open', open);
   els.btnChat.setAttribute('aria-expanded', String(open));
   if (open) {
+    hideChatToast();
     S.unread = 0;
     renderChatBadge();
     els.chatLog.scrollTop = els.chatLog.scrollHeight;
@@ -1126,25 +1154,50 @@ function enterGame() {
   openChat(false);
   showScreen('game');
   resetRound();
-  send({ type: 'hello', name: S.myName });
+  // Si vamos a preguntar el nombre, el rival se entera recién cuando lo elegís.
+  if (!S.askName) send({ type: 'hello', name: S.myName });
   addChat(null, S.role === 'guest' && !S.peerOnline
     ? 'Entraste a la partida. Ubicá tus barcos mientras vuelve tu amigo.'
     : 'Conectado. Ubicá tus barcos.');
   renderNet();
+  if (S.askName) openNameDialog();
 }
+
+// Cambiar el nombre en medio de la partida: se guarda y se le avisa al rival.
+function openNameDialog() {
+  els.nameEdit.value = els.name.value;
+  els.nameDialog.hidden = false;
+  els.nameEdit.focus();
+}
+
+els.btnName.addEventListener('click', openNameDialog);
+els.nameForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  els.nameDialog.hidden = true;
+  els.name.value = els.nameEdit.value;
+  const name = myName();
+  if (name === S.myName && !S.askName) return;
+  S.askName = false;
+  S.myName = name;
+  if (S.code) send({ type: 'hello', name });
+  render();
+});
 
 function onData(msg) {
   if (!msg || typeof msg !== 'object') return;
   // El rival entró mientras no estábamos conectados.
   if (S.phase === 'waiting') enterGame();
   switch (msg.type) {
-    case 'hello':
-      S.enemyName = cleanName(msg.name);
+    case 'hello': {
+      const name = cleanName(msg.name);
+      if (!S.heardFromEnemy) addChat(null, `Jugás contra ${name}.`);
+      else if (name !== S.enemyName) addChat(null, `${S.enemyName} ahora se llama ${name}.`);
+      S.enemyName = name;
       S.heardFromEnemy = true;
-      addChat(null, `Jugás contra ${S.enemyName}.`);
       render();
       renderNet();
       break;
+    }
     case 'ready':
       if (S.phase !== 'placing') return;
       S.enemyReady = true;
@@ -1233,6 +1286,8 @@ function leave() {
   }
   teardown();
   hideOverlay();
+  els.nameDialog.hidden = true;
+  hideChatToast();
   setLobbyBusy(false);
   lobbyMsg('');
   history.replaceState(null, '', location.pathname);
@@ -1288,10 +1343,12 @@ if (navigator.share) {
 
 els.name.value = storageGet('bn-name') || '';
 
+// Con un link de invitación se entra directo a la partida; si todavía no
+// tenemos tu nombre, se pregunta ya adentro.
 const invitedCode = normalizeCode(new URLSearchParams(location.search).get('c'));
 if (invitedCode.length === CODE_LENGTH) {
   els.joinCode.value = invitedCode;
-  lobbyMsg('¡Te invitaron a una partida! Poné tu nombre y tocá «Unirse».');
   els.btnJoin.classList.add('primary');
-  (els.name.value ? els.btnJoin : els.name).focus();
+  S.askName = !els.name.value;
+  joinGame(invitedCode);
 }

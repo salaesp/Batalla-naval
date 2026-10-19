@@ -142,6 +142,40 @@ kbd {
 /* Partida */
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .vs { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name-btn {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px dashed var(--muted);
+  border-radius: 0;
+  padding: 2px 0;
+  font-weight: 700;
+}
+.name-btn::after { content: " ✎"; font-weight: 400; color: var(--muted); }
+.name-btn:hover:not(:disabled) { background: transparent; color: var(--accent); }
+
+/* Aviso chiquito de mensaje nuevo con el chat cerrado (celular) */
+.chat-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(16px + env(safe-area-inset-bottom));
+  z-index: 25;
+  max-width: min(360px, calc(100vw - 32px));
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(18, 48, 75, .95);
+  border: 1px solid var(--line);
+  box-shadow: 0 8px 20px rgba(0, 0, 0, .35);
+  font-size: .9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transform: translateX(-50%);
+  animation: toast-in .25s ease-out;
+}
+.chat-toast b { color: #7cc4ff; }
+@keyframes toast-in { from { opacity: 0; transform: translate(-50%, 8px); } }
+#name-form { display: flex; flex-direction: column; gap: 12px; }
 
 .status {
   margin: 12px 0;
