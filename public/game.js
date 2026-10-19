@@ -586,9 +586,25 @@ function zoomMyBoard(on, autoCloseMs = 0) {
   if (on && autoCloseMs) zoomTimer = setTimeout(() => zoomMyBoard(false), autoCloseMs);
 }
 
+// Cuando le toca al rival, tu flota se agranda (después de una pausa para ver
+// el resultado de tu disparo) y queda así hasta que dispara.
+function zoomForEnemyTurn(delayMs) {
+  clearTimeout(zoomTimer);
+  zoomTimer = setTimeout(() => {
+    if (S.phase === 'playing' && !S.myTurn) zoomMyBoard(true);
+  }, delayMs);
+}
+
 els.btnMini.addEventListener('click', () => zoomMyBoard(!els.myWrap.classList.contains('zoom')));
 els.scrim.addEventListener('click', () => zoomMyBoard(false));
-addEventListener('resize', () => zoomMyBoard(false));
+// En el celular la barra del navegador cambia el alto al hacer scroll: sólo
+// importa si cambia el ancho (por ejemplo, al girar el teléfono).
+let lastWidth = innerWidth;
+addEventListener('resize', () => {
+  if (innerWidth === lastWidth) return;
+  lastWidth = innerWidth;
+  zoomMyBoard(false);
+});
 mobile.addEventListener('change', () => zoomMyBoard(false));
 
 function boom(cell) {
@@ -729,6 +745,7 @@ function startBattle(iStart) {
   S.lastEvent = '';
   addChat(null, `¡Empieza la batalla! Arranca ${iStart ? 'vos' : S.enemyName}.`);
   render();
+  if (!iStart) zoomForEnemyTurn(800);
 }
 
 function shoot(x, y) {
@@ -763,8 +780,8 @@ function handleShot(msg) {
   } else {
     S.myTurn = true;
     render();
-    // Mostrar un momento dónde cayó el tiro antes de que te toque disparar.
-    zoomMyBoard(true, 1600);
+    // Mostrar un momento dónde cayó el tiro y volver a tu tablero de disparo.
+    zoomMyBoard(true, 1300);
   }
   boom(myCells[y][x]);
 }
@@ -795,6 +812,7 @@ function handleResult(msg) {
   } else {
     S.myTurn = false;
     render();
+    zoomForEnemyTurn(1100);
   }
   boom(enemyCells[y][x]);
 }
