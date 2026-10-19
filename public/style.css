@@ -317,8 +317,8 @@ kbd {
 .mini-hit, .scrim, .chat-fab, .chat-head { display: none; }
 
 /* Celular: durante la batalla el tablero enemigo ocupa todo el ancho y tu flota
-   queda como un mini-radar al lado del estado. Cuando el rival dispara (o al
-   tocarlo) el radar se agranda en el centro un momento. */
+   queda como un mini-radar al lado del estado. Al tocarlo se agranda en el
+   centro; cuando el rival dispara sólo destella, para no mover la pantalla. */
 @media (max-width: 899px) {
   /* «dense» hace que el radar (col. 2) se acomode al lado del estado. */
   #game.battle { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-auto-flow: row dense; column-gap: 12px; }
@@ -362,6 +362,10 @@ kbd {
     cursor: zoom-in;
   }
   #game.battle #my-wrap.zoom { border-color: var(--accent); box-shadow: 0 20px 50px rgba(0, 0, 0, .6); }
+  /* Le toca al rival: el radar se marca (sin moverse). */
+  #game.battle.their-turn #my-wrap { border-color: var(--accent); }
+  #game.battle #my-wrap.alert-hit { animation: radar-hit .9s ease-out; }
+  #game.battle #my-wrap.alert-miss { animation: radar-miss .9s ease-out; }
   #game.battle #my-wrap.zoom .mini-hit { cursor: zoom-out; }
 
   .scrim {
@@ -424,6 +428,15 @@ kbd {
   .chat.open { transform: none; visibility: visible; transition: transform .3s ease; }
   .chat-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
   .chat-log { max-height: 40vh; }
+}
+
+@keyframes radar-hit {
+  0%, 30% { box-shadow: 0 0 0 3px var(--hit), 0 0 24px rgba(255, 90, 60, .6); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+@keyframes radar-miss {
+  0%, 30% { box-shadow: 0 0 0 3px var(--miss); }
+  100% { box-shadow: 0 0 0 0 transparent; }
 }
 
 @media (prefers-reduced-motion: reduce) {

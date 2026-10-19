@@ -546,6 +546,7 @@ function render() {
   els.boards.classList.toggle('playing', S.phase === 'playing');
   const battle = S.phase === 'playing' || S.phase === 'over';
   els.screens.game.classList.toggle('battle', battle);
+  els.screens.game.classList.toggle('their-turn', S.phase === 'playing' && !S.myTurn);
   if (!battle) zoomMyBoard(false);
   els.btnReady.disabled = !allPlaced();
 
@@ -565,10 +566,8 @@ document.addEventListener('visibilitychange', updateTitle);
 // En el celular, durante la batalla tu flota es un mini-radar (ver style.css).
 // Para mostrarla en grande se la escala hasta el centro de la pantalla.
 const mobile = matchMedia('(max-width: 899px)');
-let zoomTimer = 0;
 
-function zoomMyBoard(on, autoCloseMs = 0) {
-  clearTimeout(zoomTimer);
+function zoomMyBoard(on) {
   const wrap = els.myWrap;
   if (on && !(mobile.matches && els.screens.game.classList.contains('battle'))) on = false;
   if (on && !wrap.classList.contains('zoom')) {
@@ -583,16 +582,16 @@ function zoomMyBoard(on, autoCloseMs = 0) {
   wrap.classList.toggle('zoom', on);
   els.scrim.classList.toggle('on', on);
   els.btnMini.setAttribute('aria-label', on ? 'Achicar tu flota' : 'Ver tu flota en grande');
-  if (on && autoCloseMs) zoomTimer = setTimeout(() => zoomMyBoard(false), autoCloseMs);
 }
 
-// Cuando le toca al rival, tu flota se agranda (después de una pausa para ver
-// el resultado de tu disparo) y queda así hasta que dispara.
-function zoomForEnemyTurn(delayMs) {
-  clearTimeout(zoomTimer);
-  zoomTimer = setTimeout(() => {
-    if (S.phase === 'playing' && !S.myTurn) zoomMyBoard(true);
-  }, delayMs);
+// Aviso sin mover nada cuando el rival te dispara: el radar destella (rojo si
+// te tocó) y, si te tocó, el teléfono vibra.
+function alertMyBoard(hit) {
+  const wrap = els.myWrap;
+  wrap.classList.remove('alert-hit', 'alert-miss');
+  void wrap.offsetWidth;
+  wrap.classList.add(hit ? 'alert-hit' : 'alert-miss');
+  if (hit && mobile.matches) navigator.vibrate?.(120);
 }
 
 els.btnMini.addEventListener('click', () => zoomMyBoard(!els.myWrap.classList.contains('zoom')));
@@ -745,7 +744,6 @@ function startBattle(iStart) {
   S.lastEvent = '';
   addChat(null, `¡Empieza la batalla! Arranca ${iStart ? 'vos' : S.enemyName}.`);
   render();
-  if (!iStart) zoomForEnemyTurn(800);
 }
 
 function shoot(x, y) {
@@ -780,10 +778,9 @@ function handleShot(msg) {
   } else {
     S.myTurn = true;
     render();
-    // Mostrar un momento dónde cayó el tiro y volver a tu tablero de disparo.
-    zoomMyBoard(true, 1300);
   }
   boom(myCells[y][x]);
+  alertMyBoard(!!ship);
 }
 
 function handleResult(msg) {
@@ -812,7 +809,6 @@ function handleResult(msg) {
   } else {
     S.myTurn = false;
     render();
-    zoomForEnemyTurn(1100);
   }
   boom(enemyCells[y][x]);
 }
