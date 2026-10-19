@@ -6,6 +6,7 @@
 
 const SIZE = 10;
 const LETTERS = 'ABCDEFGHIJ';
+// Tiene que coincidir con src/rules.js.
 const FLEET = [
   { id: 'portaaviones', name: 'Portaaviones', size: 5 },
   { id: 'acorazado', name: 'Acorazado', size: 4 },
@@ -19,8 +20,9 @@ const CODE_LENGTH = 5;
 const PING_EVERY_MS = 15000;
 const PONG_TIMEOUT_MS = 8000;
 const MAX_RETRY_MS = 8000;
-// Intentos fallidos antes de rendirse al crear o unirse a una partida.
+// Intentos fallidos antes de rendirse al crear o unirse a una partida nueva.
 const MAX_INITIAL_FAILURES = 4;
+const HOME_REFRESH_MS = 30000;
 
 // ---------------------------------------------------------------------------
 // Utilidades
@@ -38,13 +40,14 @@ function randomCode() {
   return Array.from(bytes, (b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join('');
 }
 
-function normalizeCode(raw) {
-  return String(raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, CODE_LENGTH);
+function randomToken() {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-function cleanName(raw) {
-  const name = String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 20);
-  return name || 'Rival';
+function normalizeCode(raw) {
+  return String(raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, CODE_LENGTH);
 }
 
 function storageGet(k) {
@@ -55,29 +58,81 @@ function storageSet(k, v) {
   try { localStorage.setItem(k, v); } catch { /* sin almacenamiento */ }
 }
 
+function b64urlEncode(bytes) {
+  let s = '';
+  for (const b of bytes) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function b64urlDecode(str) {
+  const s = atob(str.replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(s, (c) => c.charCodeAt(0));
+}
+
+async function postJson(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+// ---------------------------------------------------------------------------
+// Mis partidas (guardadas en este navegador)
+// ---------------------------------------------------------------------------
+// Cada partida: { code, role: 'host' | 'guest', token, enemyName, addedAt }.
+// El token es lo que identifica al jugador ante el servidor.
+
+function loadGames() {
+  try {
+    const list = JSON.parse(storageGet('bn-games') || '[]');
+    return Array.isArray(list) ? list.filter((g) => g && g.code && g.token && g.role) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveGames(list) {
+  storageSet('bn-games', JSON.stringify(list));
+}
+
+function findGame(code) {
+  return loadGames().find((g) => g.code === code) || null;
+}
+
+function upsertGame(entry) {
+  const list = loadGames();
+  const i = list.findIndex((g) => g.code === entry.code);
+  if (i >= 0) list[i] = { ...list[i], ...entry };
+  else list.push({ addedAt: Date.now(), ...entry });
+  saveGames(list);
+}
+
+function removeGame(code) {
+  saveGames(loadGames().filter((g) => g.code !== code));
+}
+
 // ---------------------------------------------------------------------------
 // Estado
 // ---------------------------------------------------------------------------
 
 const S = {
-  // Conexión con la sala (ver src/worker.js)
+  // Conexión con la sala de la partida abierta (ver src/worker.js)
   ws: null,
   wsReady: false,
-  token: null,
-  outSeq: 0, // último mensaje propio numerado
-  outbox: [], // mensajes propios que la sala todavía no confirmó
-  inSeq: 0, // último mensaje del rival procesado
-  peerOnline: false,
-  heardFromEnemy: false,
   failures: 0,
   retryTimer: null,
   pingTimer: null,
   pongTimer: null,
-  role: null, // 'host' | 'guest'
   code: null,
-  myName: '',
-  enemyName: 'Rival',
-  phase: 'lobby', // lobby | creating | joining | waiting | placing | playing | over | closed
+  role: null, // 'host' | 'guest'
+  token: null,
+  create: false, // la conexión crea la partida
+  isNew: false, // partida que todavía no está en la lista (creando o uniéndose)
+  view: null, // último estado de la partida que mandó el servidor
+  // Ubicación de barcos (antes de «¡Listo!» la flota sólo existe acá)
   ships: [], // { id, name, size, cells: [{x, y}], hits }
   horizontal: true,
   selected: 0, // índice en FLEET del barco a ubicar, -1 si no hay
@@ -85,19 +140,13 @@ const S = {
   active: null, // id del barco ya puesto que está marcado (el último puesto, girado o movido)
   drag: null, // barco que se está arrastrando: { id, grab, start, cells, ok }
   flash: null, // { cells, msg } cuando algo no entra, se borra solo
-  incoming: new Map(), // disparos recibidos: key -> 'hit' | 'miss'
-  outgoing: new Map(), // disparos hechos: key -> 'hit' | 'miss' | 'sunk'
-  revealed: new Set(), // barcos del rival mostrados al terminar
-  enemySunk: [],
-  myReady: false,
-  enemyReady: false,
-  myTurn: false,
+  sendingFleet: false,
   pendingShot: null,
   lastEvent: '',
-  rematchMe: false,
-  rematchEnemy: false,
-  askName: false, // llegó por link sin nombre guardado: se pregunta al entrar y recién ahí se manda el «hello»
+  lastChatId: 0,
+  askName: false, // llegó por link sin nombre guardado: se pregunta antes de unirse
   unread: 0, // mensajes del rival sin leer con el chat cerrado (celular)
+  pushOn: false, // este navegador tiene los avisos activados
 };
 
 // ---------------------------------------------------------------------------
@@ -105,21 +154,30 @@ const S = {
 // ---------------------------------------------------------------------------
 
 const els = {
-  screens: { lobby: $('#lobby'), waiting: $('#waiting'), game: $('#game') },
+  screens: { lobby: $('#lobby'), game: $('#game') },
   name: $('#name'),
   btnCreate: $('#btn-create'),
   joinForm: $('#join-form'),
   joinCode: $('#join-code'),
   btnJoin: $('#btn-join'),
   lobbyMsg: $('#lobby-msg'),
-  btnLobbyCancel: $('#btn-lobby-cancel'),
-  codeDisplay: $('#code-display'),
-  waitingNote: $('#waiting-note'),
+  gamesList: $('#games-list'),
+  gamesEmpty: $('#games-empty'),
+  pushText: $('#push-text'),
+  btnPush: $('#btn-push'),
+  btnPushOff: $('#btn-push-off'),
+  pushActions: $('#push-actions'),
+  btnTransfer: $('#btn-transfer'),
+  invite: $('#invite'),
+  inviteCode: $('#invite-code'),
   btnCopy: $('#btn-copy'),
   btnShare: $('#btn-share'),
-  btnCancel: $('#btn-cancel'),
+  pushOffer: $('#push-offer'),
+  btnPushOffer: $('#btn-push-offer'),
+  btnPushDismiss: $('#btn-push-dismiss'),
   btnName: $('#btn-name'),
   enemyName: $('#enemy-name'),
+  peerDot: $('#peer-dot'),
   chatToast: $('#chat-toast'),
   nameDialog: $('#name-dialog'),
   nameForm: $('#name-form'),
@@ -167,12 +225,6 @@ function lobbyMsg(text, isError = false) {
   els.lobbyMsg.classList.toggle('error', isError);
 }
 
-function setLobbyBusy(busy) {
-  els.btnCreate.disabled = busy;
-  els.btnJoin.disabled = busy;
-  els.btnLobbyCancel.hidden = !busy;
-}
-
 function showOverlay(title, text, actions) {
   els.overlayTitle.textContent = title;
   els.overlayText.textContent = text;
@@ -189,6 +241,26 @@ function showOverlay(title, text, actions) {
 
 function hideOverlay() {
   els.overlay.hidden = true;
+}
+
+// ---------------------------------------------------------------------------
+// Lo que dice el servidor
+// ---------------------------------------------------------------------------
+
+const V = () => S.view;
+const phase = () => S.view?.phase ?? 'connecting';
+const enemy = () => S.view?.enemyName || 'Tu rival';
+const myTurn = () => !!S.view?.myTurn;
+
+// La flota que se muestra: la del servidor una vez confirmada, si no la que estás armando.
+function shownShips() {
+  return S.view?.myReady ? S.view.myShips || [] : S.ships;
+}
+
+function shotMap(list) {
+  const m = new Map();
+  for (const s of list || []) m.set(key(s.x, s.y), s.r);
+  return m;
 }
 
 // ---------------------------------------------------------------------------
@@ -251,6 +323,22 @@ function allPlaced() {
   return S.ships.length === FLEET.length;
 }
 
+// La flota a medio armar se guarda por si se cierra el juego antes de «¡Listo!».
+function saveDraft() {
+  if (!S.view) return;
+  storageSet('bn-draft', JSON.stringify({ code: S.code, round: S.view.round, ships: S.ships }));
+}
+
+function loadDraft() {
+  try {
+    const d = JSON.parse(storageGet('bn-draft') || 'null');
+    if (d && d.code === S.code && d.round === S.view?.round && Array.isArray(d.ships)) {
+      return d.ships.filter((s) => FLEET.some((f) => f.id === s.id) && Array.isArray(s.cells));
+    }
+  } catch { /* borrador roto */ }
+  return [];
+}
+
 // ---------------------------------------------------------------------------
 // Tableros
 // ---------------------------------------------------------------------------
@@ -301,7 +389,7 @@ function cellFromPoint(e) {
 }
 
 function canEditFleet() {
-  return S.phase === 'placing' && !S.myReady;
+  return phase() === 'placing' && !S.view.myReady && !S.sendingFleet;
 }
 
 els.myBoard.addEventListener('pointerdown', (e) => {
@@ -411,7 +499,9 @@ function previewCells() {
 }
 
 function renderMyBoard() {
-  const placing = canEditFleet();
+  const placing = !!S.view && canEditFleet();
+  const ships = shownShips();
+  const incoming = shotMap(S.view?.incoming);
   let preview = previewCells();
   if (S.drag && (S.drag.at.x !== S.drag.start.x || S.drag.at.y !== S.drag.start.y)) {
     preview = { cells: S.drag.cells, ok: S.drag.ok };
@@ -422,18 +512,19 @@ function renderMyBoard() {
     for (let x = 0; x < SIZE; x++) {
       const k = key(x, y);
       const cls = ['cell'];
-      const ship = shipAt(x, y);
+      const ship = shipAt(x, y, ships);
+      const sunk = ship && ship.hits === ship.size;
       if (ship) {
         cls.push('ship', ship.cells[0].y === ship.cells[ship.size - 1].y ? 'h' : 'v');
         const i = ship.cells.findIndex((c) => c.x === x && c.y === y);
         if (i === 0) cls.push('bow');
         if (i === ship.size - 1) cls.push('stern');
-        if (ship.hits === ship.size) cls.push('sunk');
+        if (sunk) cls.push('sunk');
         if (placing && ship.id === S.active) cls.push('active');
         if (placing && preview && S.drag?.id === ship.id) cls.push('lifted');
       }
-      const shot = S.incoming.get(k);
-      if (shot === 'hit' && !(ship && ship.hits === ship.size)) cls.push('hit');
+      const shot = incoming.get(k);
+      if (shot === 'hit' && !sunk) cls.push('hit');
       if (shot === 'miss') cls.push('miss');
       if (placing) cls.push('placing');
       if (previewKeys.has(k)) cls.push(preview.ok ? 'preview' : 'preview-bad');
@@ -445,14 +536,23 @@ function renderMyBoard() {
 }
 
 function renderEnemyBoard() {
-  const canShoot = S.phase === 'playing' && S.myTurn && !S.pendingShot;
+  const v = V();
+  const canShoot = phase() === 'playing' && myTurn() && !S.pendingShot && S.wsReady;
+  const outgoing = shotMap(v?.outgoing);
+  for (const s of v?.sunk || []) {
+    for (const c of s.cells) outgoing.set(key(c.x, c.y), 'sunk');
+  }
+  const revealed = new Set();
+  for (const cells of v?.reveal || []) {
+    for (const c of cells) revealed.add(key(c.x, c.y));
+  }
   for (let y = 0; y < SIZE; y++) {
     for (let x = 0; x < SIZE; x++) {
       const k = key(x, y);
       const cls = ['cell'];
-      const shot = S.outgoing.get(k);
+      const shot = outgoing.get(k);
       if (shot) cls.push(shot);
-      else if (S.revealed.has(k)) cls.push('reveal');
+      else if (revealed.has(k)) cls.push('reveal');
       const pending = S.pendingShot && S.pendingShot.x === x && S.pendingShot.y === y;
       if (pending) cls.push('pending');
       const target = canShoot && !shot;
@@ -483,7 +583,7 @@ function renderShipList() {
     name.textContent = f.name;
     li.append(name, pips(f.size));
     li.addEventListener('click', () => {
-      if (S.myReady) return;
+      if (!canEditFleet()) return;
       // Un barco puesto queda marcado (para girarlo con el botón); uno sin poner pasa a ser el próximo.
       if (placed) S.active = f.id;
       else {
@@ -497,7 +597,7 @@ function renderShipList() {
 }
 
 function renderEnemyFleet() {
-  const sunk = [...S.enemySunk];
+  const sunk = (V()?.sunk || []).map((s) => s.name);
   els.enemyFleet.replaceChildren(...FLEET.map((f) => {
     const li = document.createElement('li');
     const i = sunk.indexOf(f.name);
@@ -511,12 +611,18 @@ function renderEnemyFleet() {
 }
 
 function statusText() {
-  const enemy = S.enemyName;
-  switch (S.phase) {
+  const v = V();
+  if (!v) return S.askName ? 'Elegí tu nombre para entrar a la partida.' : 'Conectando…';
+  const rival = enemy();
+  switch (v.phase) {
     case 'placing': {
-      if (S.myReady) return `Flota lista. Esperando a que ${enemy} ubique sus barcos…`;
+      if (v.myReady) {
+        if (!v.enemyJoined) return 'Flota lista. Cuando tu amigo entre y ubique la suya, empieza la batalla.';
+        return `Flota lista. Esperando a que ${rival} ubique sus barcos…`;
+      }
+      if (S.sendingFleet) return 'Mandando tu flota…';
       if (S.flash) return S.flash.msg;
-      const waiting = S.enemyReady ? ` ${enemy} ya está esperando.` : '';
+      const waiting = v.enemyReady ? ` ${rival} ya está esperando.` : '';
       const edit = S.ships.length ? ' Tocá un barco para girarlo o arrastralo para moverlo.' : '';
       if (allPlaced()) return `¡Flota ubicada! Tocá «¡Listo!» para empezar.${edit}${waiting}`;
       const f = FLEET[S.selected];
@@ -524,51 +630,76 @@ function statusText() {
       return `Tocá el tablero para poner el ${f.name.toLowerCase()} (${f.size} casillas, ${dir}).${edit}${waiting}`;
     }
     case 'playing': {
-      const turn = S.myTurn ? '🎯 Tu turno: elegí dónde disparar.' : `⏳ Turno de ${enemy}…`;
+      const turn = v.myTurn ? '🎯 Tu turno: elegí dónde disparar.' : `⏳ Turno de ${rival}…`;
       return S.lastEvent ? `${S.lastEvent} ${turn}` : turn;
     }
-    case 'over':
-      if (S.rematchMe) return `Esperando que ${enemy} acepte la revancha…`;
-      if (S.rematchEnemy) return `${enemy} quiere la revancha. ¿Jugamos otra?`;
-      return S.lastEvent || 'Partida terminada.';
+    case 'over': {
+      let result;
+      if (v.winner === 'me') {
+        result = v.endReason === 'abandon' ? `🏆 Ganaste: ${rival} abandonó la partida.` : '🏆 ¡Ganaste! Hundiste toda la flota enemiga.';
+      } else {
+        result = v.endReason === 'abandon' ? 'Abandonaste la partida.' : `☠️ Perdiste. ${rival} hundió toda tu flota.`;
+      }
+      if (v.enemyLeft) return v.endReason === 'abandon' ? result : `${result} ${rival} dejó la partida.`;
+      if (v.rematch.me) return `${result} Esperando que ${rival} acepte la revancha…`;
+      if (v.rematch.enemy) return `${result} ${rival} quiere la revancha. ¿Jugamos otra?`;
+      return result;
+    }
     default:
       return '';
   }
 }
 
 function render() {
-  if (S.phase === 'lobby' || S.phase === 'waiting') return;
-  els.btnName.textContent = S.myName;
-  els.enemyName.textContent = S.enemyName;
-  els.gameCode.textContent = S.code;
+  if (els.screens.game.hidden) return;
+  const v = V();
+  const ph = phase();
+  els.btnName.textContent = v?.myName || els.name.value.trim() || 'Capitán';
+  els.enemyName.textContent = v?.enemyJoined ? v.enemyName : 'esperando rival';
+  els.peerDot.hidden = !v?.peerOnline;
+  els.gameCode.textContent = S.code || '';
   els.status.textContent = statusText();
-  els.status.classList.toggle('my-turn', S.phase === 'playing' && S.myTurn);
+  els.status.classList.toggle('my-turn', ph === 'playing' && myTurn());
 
-  const placing = S.phase === 'placing';
-  els.placement.hidden = !placing || S.myReady;
-  els.endActions.hidden = S.phase !== 'over';
-  els.btnRematch.disabled = S.rematchMe;
-  els.btnRematch.textContent = S.rematchEnemy ? 'Aceptar revancha' : 'Revancha';
-  els.enemyWrap.classList.toggle('inactive', placing);
-  els.boards.classList.toggle('playing', S.phase === 'playing');
-  const battle = S.phase === 'playing' || S.phase === 'over';
+  const placing = ph === 'placing';
+  els.invite.hidden = !v || v.enemyJoined;
+  els.inviteCode.textContent = S.code || '';
+  els.placement.hidden = !placing || v.myReady;
+  els.btnReady.disabled = !allPlaced() || S.sendingFleet || !S.wsReady;
+  els.endActions.hidden = ph !== 'over';
+  els.btnRematch.hidden = !v || v.enemyLeft || (v.endReason === 'abandon' && v.winner !== 'me');
+  els.btnRematch.disabled = !!v?.rematch.me;
+  els.btnRematch.textContent = v?.rematch.enemy ? 'Aceptar revancha' : 'Revancha';
+  els.enemyWrap.classList.toggle('inactive', ph !== 'playing' && ph !== 'over');
+  els.boards.classList.toggle('playing', ph === 'playing');
+  const battle = ph === 'playing' || ph === 'over';
   els.screens.game.classList.toggle('battle', battle);
-  els.screens.game.classList.toggle('their-turn', S.phase === 'playing' && !S.myTurn);
+  els.screens.game.classList.toggle('their-turn', ph === 'playing' && !myTurn());
   if (!battle) zoomMyBoard(false);
-  els.btnReady.disabled = !allPlaced();
+  els.chatInput.disabled = !v;
 
+  if (canEditFleet()) saveDraft();
   renderShipList();
   renderMyBoard();
   renderEnemyBoard();
   renderEnemyFleet();
+  renderNet();
+  renderPushOffer();
   updateTitle();
 }
 
 function updateTitle() {
-  const myTurn = S.phase === 'playing' && S.myTurn;
-  document.title = myTurn && document.hidden ? '🎯 ¡Tu turno! · Batalla Naval' : 'Batalla Naval';
+  const mine = !els.screens.game.hidden && phase() === 'playing' && myTurn();
+  document.title = mine && document.hidden ? '🎯 ¡Tu turno! · Batalla Naval' : 'Batalla Naval';
 }
 document.addEventListener('visibilitychange', updateTitle);
+
+function renderNet() {
+  let text = '';
+  if (S.code && !S.wsReady && (S.view || S.failures > 0)) text = '📡 Sin conexión. Reconectando…';
+  els.netBanner.textContent = text;
+  els.netBanner.hidden = !text;
+}
 
 // En el celular, durante la batalla tu flota es un mini-radar (ver style.css).
 // Para mostrarla en grande se la escala hasta el centro de la pantalla.
@@ -682,7 +813,7 @@ function rotate() {
 
 els.btnRotate.addEventListener('click', rotate);
 els.btnRandom.addEventListener('click', () => {
-  if (S.myReady) return;
+  if (!canEditFleet()) return;
   S.ships = randomFleet();
   S.selected = -1;
   S.active = null;
@@ -690,7 +821,7 @@ els.btnRandom.addEventListener('click', () => {
   render();
 });
 els.btnClear.addEventListener('click', () => {
-  if (S.myReady) return;
+  if (!canEditFleet()) return;
   S.ships = [];
   S.selected = 0;
   S.active = null;
@@ -698,11 +829,9 @@ els.btnClear.addEventListener('click', () => {
   render();
 });
 els.btnReady.addEventListener('click', () => {
-  if (!allPlaced() || S.myReady || S.phase !== 'placing') return;
-  S.myReady = true;
-  send({ type: 'ready' });
-  addChat(null, 'Tu flota está lista.');
-  maybeStart();
+  if (!allPlaced() || !canEditFleet()) return;
+  if (!send({ t: 'place', ships: S.ships.map((s) => ({ id: s.id, cells: s.cells })) })) return;
+  S.sendingFleet = true;
   render();
 });
 document.addEventListener('keydown', (e) => {
@@ -713,166 +842,157 @@ document.addEventListener('keydown', (e) => {
 // Juego
 // ---------------------------------------------------------------------------
 
-function resetRound() {
-  S.ships = [];
+function resetPlacement() {
+  S.ships = loadDraft();
   S.horizontal = true;
-  S.selected = 0;
+  S.selected = nextUnplaced();
   S.hover = null;
   S.active = null;
   S.drag = null;
   clearFlash();
-  S.incoming.clear();
-  S.outgoing.clear();
-  S.revealed.clear();
-  S.enemySunk = [];
-  S.myReady = false;
-  S.enemyReady = false;
-  S.myTurn = false;
-  S.pendingShot = null;
-  S.lastEvent = '';
-  S.rematchMe = false;
-  S.rematchEnemy = false;
-  S.phase = 'placing';
-  hideOverlay();
-  render();
-}
-
-// El anfitrión decide quién arranca cuando ambos están listos.
-function maybeStart() {
-  if (S.role !== 'host' || !S.myReady || !S.enemyReady || S.phase !== 'placing') return;
-  const first = Math.random() < 0.5 ? 'host' : 'guest';
-  send({ type: 'start', first });
-  startBattle(first === 'host');
-}
-
-function startBattle(iStart) {
-  S.phase = 'playing';
-  S.myTurn = iStart;
-  S.lastEvent = '';
-  addChat(null, `¡Empieza la batalla! Arranca ${iStart ? 'vos' : S.enemyName}.`);
-  render();
 }
 
 function shoot(x, y) {
-  if (S.phase !== 'playing' || !S.myTurn || S.pendingShot || S.outgoing.has(key(x, y))) return;
+  if (phase() !== 'playing' || !myTurn() || S.pendingShot) return;
+  if (S.view.outgoing.some((s) => s.x === x && s.y === y)) return;
+  if (!send({ t: 'shoot', x, y })) return;
   S.pendingShot = { x, y };
-  send({ type: 'shot', x, y });
   render();
 }
 
-function handleShot(msg) {
-  const { x, y } = msg;
-  if (S.phase !== 'playing' || S.myTurn || !validCoord(x, y) || S.incoming.has(key(x, y))) return;
-  const ship = shipAt(x, y);
-  let sunk = null;
-  if (ship) {
-    ship.hits++;
-    S.incoming.set(key(x, y), 'hit');
-    if (ship.hits === ship.size) sunk = { name: ship.name, cells: ship.cells };
-  } else {
-    S.incoming.set(key(x, y), 'miss');
+// Texto del último disparo, para el estado (también al abrir la partida más tarde).
+function describeShot(by, shot, sunkName) {
+  const where = coordName(shot.x, shot.y);
+  if (by === 'me') {
+    if (sunkName) return `💥 ¡Hundiste el ${sunkName.toLowerCase()}!`;
+    return shot.r === 'hit' ? `🔥 ¡Tocado en ${where}!` : `💦 Agua en ${where}.`;
   }
-  const over = S.ships.every((s) => s.hits === s.size);
-  send({ type: 'result', x, y, hit: !!ship, sunk, over });
-
-  const where = coordName(x, y);
-  if (sunk) S.lastEvent = `💥 ${S.enemyName} hundió tu ${sunk.name.toLowerCase()} (${where}).`;
-  else if (ship) S.lastEvent = `🔥 ${S.enemyName} te tocó en ${where}.`;
-  else S.lastEvent = `💦 ${S.enemyName} tiró al agua en ${where}.`;
-
-  if (over) {
-    endGame(false);
-  } else {
-    S.myTurn = true;
-    render();
-  }
-  boom(myCells[y][x]);
-  alertMyBoard(!!ship);
+  const rival = enemy();
+  if (sunkName) return `💥 ${rival} hundió tu ${sunkName.toLowerCase()} (${where}).`;
+  return shot.r === 'hit' ? `🔥 ${rival} te tocó en ${where}.` : `💦 ${rival} tiró al agua en ${where}.`;
 }
 
-function handleResult(msg) {
-  const p = S.pendingShot;
-  if (S.phase !== 'playing' || !p || p.x !== msg.x || p.y !== msg.y) return;
+function lastShotSummary(v) {
+  if (v.phase !== 'playing') return '';
+  if (v.myTurn && v.incoming.length) {
+    const shot = v.incoming[v.incoming.length - 1];
+    const ship = shipAt(shot.x, shot.y, v.myShips || []);
+    return describeShot('enemy', shot, ship && ship.hits === ship.size ? ship.name : null);
+  }
+  if (!v.myTurn && v.outgoing.length) {
+    const shot = v.outgoing[v.outgoing.length - 1];
+    const sunk = v.sunk.find((s) => s.cells.some((c) => c.x === shot.x && c.y === shot.y));
+    return describeShot('me', shot, sunk?.name);
+  }
+  return '';
+}
+
+// Llega el estado de la partida desde el servidor.
+function onState(view, event) {
+  const prev = S.view;
+  const first = !prev;
+  S.view = view;
   S.pendingShot = null;
-  const { x, y } = p;
-  S.outgoing.set(key(x, y), msg.hit ? 'hit' : 'miss');
-  const where = coordName(x, y);
-  if (msg.sunk && Array.isArray(msg.sunk.cells)) {
-    for (const c of msg.sunk.cells) {
-      if (validCoord(c.x, c.y)) S.outgoing.set(key(c.x, c.y), 'sunk');
-    }
-    const name = cleanName(msg.sunk.name);
-    S.enemySunk.push(name);
-    S.lastEvent = `💥 ¡Hundiste el ${name.toLowerCase()}!`;
-  } else if (msg.hit) {
-    S.lastEvent = `🔥 ¡Tocado en ${where}!`;
-  } else {
-    S.lastEvent = `💦 Agua en ${where}.`;
-  }
+  S.sendingFleet = false;
+  S.role = view.role;
 
-  if (msg.over) {
-    send({ type: 'reveal', ships: S.ships.map((s) => s.cells) });
-    endGame(true);
-  } else {
-    S.myTurn = false;
-    render();
+  if (first) {
+    if (S.isNew) {
+      S.isNew = false;
+      upsertGame({ code: S.code, role: S.role, token: S.token, enemyName: view.enemyName || '' });
+    }
+    history.replaceState(null, '', `${location.pathname}?c=${S.code}`);
+    if (S.pushOn && !view.pushOn) syncPushForCurrent();
   }
-  boom(enemyCells[y][x]);
+  if (view.enemyName) upsertGame({ code: S.code, enemyName: view.enemyName });
+  if (first || prev.round !== view.round) {
+    resetPlacement();
+    S.lastEvent = lastShotSummary(view);
+  }
+  renderChat(first);
+  handleEvent(prev, event);
+  render();
+
+  const justEnded = prev && prev.phase !== 'over' && view.phase === 'over';
+  if (justEnded) showEndOverlay();
 }
 
-function handleReveal(msg) {
-  if (S.phase !== 'over' || !Array.isArray(msg.ships)) return;
-  for (const cells of msg.ships) {
-    if (!Array.isArray(cells)) continue;
-    for (const c of cells) {
-      if (c && validCoord(c.x, c.y)) S.revealed.add(key(c.x, c.y));
+function handleEvent(prev, event) {
+  if (!event) return;
+  const rival = enemy();
+  const v = V();
+  switch (event.kind) {
+    case 'joined':
+      addChat(null, `${rival} se unió a la partida.`);
+      break;
+    case 'name':
+      if (event.by === 'enemy') addChat(null, `${event.old} ahora se llama ${event.name}.`);
+      break;
+    case 'ready':
+      if (event.by === 'enemy') addChat(null, `${rival} tiene su flota lista.`);
+      else addChat(null, 'Tu flota está lista.');
+      break;
+    case 'start':
+      S.lastEvent = '';
+      addChat(null, `¡Empieza la batalla! Arranca ${event.first === 'me' ? 'vos' : rival}.`);
+      break;
+    case 'shot': {
+      const shot = { x: event.x, y: event.y, r: event.r };
+      S.lastEvent = describeShot(event.by, shot, event.sunk);
+      if (event.by === 'me') {
+        boom(enemyCells[event.y][event.x]);
+      } else {
+        boom(myCells[event.y][event.x]);
+        alertMyBoard(event.r === 'hit');
+      }
+      break;
     }
+    case 'rematch':
+      if (event.by === 'enemy') addChat(null, `${rival} quiere la revancha.`);
+      break;
+    case 'newround':
+      S.lastEvent = '';
+      addChat(null, '¡Revancha! Ubicá tus barcos.');
+      break;
+    case 'abandon':
+      if (event.by === 'enemy') addChat(null, v.phase === 'over' && v.endReason !== 'abandon' ? `${rival} dejó la partida.` : `${rival} abandonó la partida.`);
+      break;
   }
-  render();
 }
 
-function endGame(won) {
-  S.phase = 'over';
-  S.myTurn = false;
-  S.lastEvent = won ? '🏆 ¡Ganaste! Hundiste toda la flota enemiga.' : `☠️ Perdiste. ${S.enemyName} hundió toda tu flota.`;
-  addChat(null, won ? '¡Ganaste la partida!' : `${S.enemyName} ganó la partida.`);
-  render();
-  showOverlay(
-    won ? '🏆 ¡Ganaste!' : '☠️ Perdiste',
-    won ? `Hundiste toda la flota de ${S.enemyName}.` : `${S.enemyName} hundió toda tu flota.`,
-    [
-      { label: 'Revancha', primary: true, onClick: () => { hideOverlay(); askRematch(); } },
-      { label: 'Ver tableros', onClick: hideOverlay },
-    ],
-  );
+function showEndOverlay() {
+  const v = V();
+  const rival = enemy();
+  const won = v.winner === 'me';
+  let title = won ? '🏆 ¡Ganaste!' : '☠️ Perdiste';
+  let text = won ? `Hundiste toda la flota de ${rival}.` : `${rival} hundió toda tu flota.`;
+  if (v.endReason === 'abandon') {
+    title = won ? '🏆 Ganaste' : 'Partida terminada';
+    text = won ? `${rival} abandonó la partida.` : 'Abandonaste la partida.';
+  }
+  addChat(null, won ? '¡Ganaste la partida!' : `${rival} ganó la partida.`);
+  const actions = [{ label: 'Ver tableros', onClick: hideOverlay }];
+  if (!v.enemyLeft && v.endReason !== 'abandon') {
+    actions.unshift({ label: 'Revancha', primary: true, onClick: () => { hideOverlay(); askRematch(); } });
+  }
+  showOverlay(title, text, actions);
 }
 
 function askRematch() {
-  if (S.phase !== 'over' || S.rematchMe) return;
-  S.rematchMe = true;
-  send({ type: 'rematch' });
-  maybeRematch();
-  render();
-}
-
-function maybeRematch() {
-  if (S.phase !== 'over' || !S.rematchMe || !S.rematchEnemy) return;
-  resetRound();
-  addChat(null, '¡Revancha! Ubicá tus barcos.');
+  const v = V();
+  if (!v || v.phase !== 'over' || v.rematch.me) return;
+  send({ t: 'rematch' });
 }
 
 els.btnRematch.addEventListener('click', askRematch);
-els.btnHome.addEventListener('click', leave);
-els.btnLeave.addEventListener('click', () => {
-  if (S.phase === 'playing' && !confirm('¿Seguro que querés abandonar la partida?')) return;
-  leave();
-});
+els.btnHome.addEventListener('click', goHome);
+els.btnLeave.addEventListener('click', goHome);
 
 // ---------------------------------------------------------------------------
 // Chat
 // ---------------------------------------------------------------------------
 
-function addChat(author, text, mine = false) {
+function addChat(author, text, mine = false, quiet = false) {
   const p = document.createElement('p');
   if (author === null) {
     p.className = 'sys';
@@ -885,10 +1005,30 @@ function addChat(author, text, mine = false) {
   }
   els.chatLog.append(p);
   els.chatLog.scrollTop = els.chatLog.scrollHeight;
-  if (author !== null && !mine && !els.chat.classList.contains('open')) {
+  if (author !== null && !mine && !quiet && !els.chat.classList.contains('open')) {
     S.unread++;
     renderChatBadge();
     showChatToast(author, text);
+  }
+}
+
+// Agrega los mensajes nuevos del historial que guarda el servidor.
+function renderChat(initial) {
+  const v = V();
+  if (initial) {
+    els.chatLog.replaceChildren();
+    S.lastChatId = 0;
+    S.unread = 0;
+    renderChatBadge();
+  }
+  for (const m of v.chat) {
+    if (m.id <= S.lastChatId) continue;
+    S.lastChatId = m.id;
+    addChat(m.mine ? v.myName : enemy(), m.text, m.mine, initial);
+  }
+  if (initial) {
+    if (!v.enemyJoined) addChat(null, 'Mandale el link a tu amigo. Mientras tanto, ubicá tus barcos.');
+    else if (v.chat.length === 0) addChat(null, `Jugás contra ${enemy()}.`);
   }
 }
 
@@ -911,7 +1051,7 @@ function hideChatToast() {
 
 els.chatToast.addEventListener('click', () => openChat(true));
 
-// En el celular el chat es un panel que se abre con el botón flotante.
+// En el celular el chat es un panel que se abre con el botón de la barra de arriba.
 function openChat(open) {
   els.chat.classList.toggle('open', open);
   els.btnChat.setAttribute('aria-expanded', String(open));
@@ -934,53 +1074,48 @@ els.btnChatClose.addEventListener('click', () => openChat(false));
 els.chatForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const text = els.chatInput.value.trim().slice(0, 200);
-  if (!text || !S.code) return;
-  send({ type: 'chat', text });
-  addChat(S.myName, text, true);
+  if (!text || !send({ t: 'chat', text })) return;
   els.chatInput.value = '';
 });
 
 // ---------------------------------------------------------------------------
-// Red: WebSocket con la sala de la partida (src/worker.js)
+// Red: WebSocket con la sala de la partida abierta (src/worker.js)
 // ---------------------------------------------------------------------------
-// Cada mensaje propio va numerado y queda en `outbox` hasta que la sala lo
-// confirma; si se corta la conexión se reenvía al reconectar. La sala guarda los
-// mensajes del rival y, al reconectar, manda los que nos perdimos.
-
-function randomToken() {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-}
+// El servidor guarda la partida: cada jugada se manda y el servidor responde con
+// el estado nuevo. Si se corta la conexión, al reconectar llega el estado completo.
 
 function send(data) {
-  if (!S.code) return;
-  const seq = ++S.outSeq;
-  S.outbox.push({ seq, data });
-  if (socketOpen()) S.ws.send(JSON.stringify({ t: 'msg', seq, data }));
+  if (!socketOpen()) {
+    renderNet();
+    return false;
+  }
+  S.ws.send(JSON.stringify(data));
+  return true;
 }
 
 function socketOpen() {
-  return S.wsReady && S.ws.readyState === WebSocket.OPEN;
+  return S.wsReady && S.ws?.readyState === WebSocket.OPEN;
 }
 
 function connect() {
   clearTimeout(S.retryTimer);
   if (!S.code || S.ws) return;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const params = new URLSearchParams({ role: S.role, token: S.token, since: S.inSeq });
+  const params = new URLSearchParams({ role: S.role, token: S.token });
+  if (S.create) params.set('create', '1');
+  if (S.isNew) params.set('name', myName());
   const ws = new WebSocket(`${proto}://${location.host}/api/rooms/${S.code}/ws?${params}`);
   S.ws = ws;
   S.wsReady = false;
   ws.onmessage = (e) => {
-    if (S.ws === ws) onSocketMessage(ws, e.data);
+    if (S.ws === ws) onSocketMessage(e.data);
   };
   ws.onclose = () => {
     if (S.ws === ws) onSocketLost();
   };
 }
 
-function onSocketMessage(ws, raw) {
+function onSocketMessage(raw) {
   if (raw === 'pong') {
     clearTimeout(S.pongTimer);
     return;
@@ -988,24 +1123,21 @@ function onSocketMessage(ws, raw) {
   let m;
   try { m = JSON.parse(raw); } catch { return; }
   switch (m.t) {
-    case 'welcome':
-      S.wsReady = true;
-      S.failures = 0;
-      S.outbox = S.outbox.filter((o) => o.seq > m.lastSeq);
-      for (const o of S.outbox) ws.send(JSON.stringify({ t: 'msg', seq: o.seq, data: o.data }));
-      startPing();
-      onWelcome(m.peerPresent);
-      break;
-    case 'ack':
-      S.outbox = S.outbox.filter((o) => o.seq > m.seq);
+    case 'state':
+      if (!S.wsReady) {
+        S.wsReady = true;
+        S.failures = 0;
+        startPing();
+        // El servidor no manda avisos mientras tenés la partida a la vista.
+        send({ t: 'visible', visible: !document.hidden });
+      }
+      onState(m.view, m.event);
       break;
     case 'peer':
-      onPeerPresence(m.present);
-      break;
-    case 'msg':
-      if (!Number.isInteger(m.seq) || m.seq <= S.inSeq) return;
-      S.inSeq = m.seq;
-      onData(m.data);
+      if (S.view) {
+        S.view.peerOnline = m.present;
+        render();
+      }
       break;
     case 'error':
       onRoomError(m.error);
@@ -1021,17 +1153,14 @@ function onSocketLost() {
   stopPing();
   try { ws?.close(); } catch { /* ya cerrada */ }
   if (!S.code) return;
-  if (S.phase === 'creating' || S.phase === 'joining') {
-    if (++S.failures >= MAX_INITIAL_FAILURES) {
-      failToLobby('No se pudo conectar con el servidor. Revisá tu internet y probá de nuevo.');
-      return;
-    }
-  } else {
-    S.failures++;
+  S.failures++;
+  if (S.isNew && S.failures >= MAX_INITIAL_FAILURES) {
+    failToLobby('No se pudo conectar con el servidor. Revisá tu internet y probá de nuevo.');
+    return;
   }
   const delay = Math.min(500 * 2 ** S.failures, MAX_RETRY_MS);
   S.retryTimer = setTimeout(connect, delay);
-  renderNet();
+  render();
 }
 
 function startPing() {
@@ -1054,64 +1183,60 @@ function checkAlive() {
 
 // Al volver a la pestaña o recuperar internet, reconecta (o verifica la conexión) en el acto.
 function wakeUp() {
+  if (!els.screens.lobby.hidden) refreshGames();
   if (!S.code) return;
   if (!S.ws) connect();
   else checkAlive();
 }
 document.addEventListener('visibilitychange', () => {
+  // El servidor no manda avisos mientras tenés la partida a la vista.
+  if (socketOpen()) send({ t: 'visible', visible: !document.hidden });
   if (document.visibilityState === 'visible') wakeUp();
 });
 window.addEventListener('online', wakeUp);
 
-function onWelcome(peerPresent) {
-  if (S.phase === 'creating') {
-    S.phase = 'waiting';
-    els.codeDisplay.textContent = S.code;
-    lobbyMsg('');
-    setLobbyBusy(false);
-    showScreen('waiting');
-  } else if (S.phase === 'joining') {
-    enterGame();
-  }
-  onPeerPresence(peerPresent, true);
-}
-
-function onPeerPresence(present, quiet = false) {
-  const changed = present !== S.peerOnline;
-  S.peerOnline = present;
-  if (present && S.phase === 'waiting') {
-    enterGame();
-    return;
-  }
-  if (changed && !quiet && ['placing', 'playing', 'over'].includes(S.phase)) {
-    addChat(null, present ? `${S.enemyName} volvió.` : `${S.enemyName} se desconectó. Esperando que vuelva…`);
-  }
-  renderNet();
-}
-
 function onRoomError(error) {
-  if (error === 'taken' && S.phase === 'creating') {
+  if (error === 'taken' && S.create && S.isNew) {
     // Ese código ya está en uso: prueba con otro.
     createGame();
+    return;
+  }
+  const code = S.code;
+  const wasSaved = !S.isNew;
+  if (error === 'not-found' && wasSaved) {
+    removeGame(code);
+    failToLobby('Esa partida ya no existe (se borran después de 30 días sin jugar).');
     return;
   }
   failToLobby({
     'not-found': 'No existe ninguna partida con ese código. Revisalo y probá de nuevo.',
     full: 'Esa partida ya tiene dos jugadores.',
+    taken: 'No se pudo abrir la partida.',
   }[error] || 'No se pudo entrar a la partida.');
 }
 
-function renderNet() {
-  els.waitingNote.textContent = S.wsReady ? 'Esperando que se una…' : 'Reconectando…';
-  let text = '';
-  if (['placing', 'playing', 'over'].includes(S.phase)) {
-    if (!S.wsReady) text = '📡 Sin conexión. Reconectando…';
-    else if (!S.peerOnline && !S.heardFromEnemy) text = '⏳ Tu amigo todavía no volvió a la partida. Podés ir ubicando tus barcos.';
-    else if (!S.peerOnline) text = `⚠️ Se cortó la conexión de ${S.enemyName}. Cuando vuelva, la partida sigue donde estaba.`;
-  }
-  els.netBanner.textContent = text;
-  els.netBanner.hidden = !text;
+function teardown() {
+  clearTimeout(S.retryTimer);
+  stopPing();
+  const ws = S.ws;
+  S.ws = null;
+  S.wsReady = false;
+  try { ws?.close(); } catch { /* ya cerrada */ }
+  S.code = null;
+  S.role = null;
+  S.token = null;
+  S.create = false;
+  S.isNew = false;
+  S.view = null;
+  S.failures = 0;
+  S.pendingShot = null;
+  S.sendingFleet = false;
+  S.askName = false;
 }
+
+// ---------------------------------------------------------------------------
+// Abrir, crear y unirse a partidas
+// ---------------------------------------------------------------------------
 
 function myName() {
   const name = els.name.value.replace(/\s+/g, ' ').trim().slice(0, 20);
@@ -1119,51 +1244,81 @@ function myName() {
   return name || 'Capitán';
 }
 
-function startSession(role, code, phase) {
+function enterGameScreen() {
+  hideOverlay();
+  hideChatToast();
+  openChat(false);
+  els.chatLog.replaceChildren();
+  S.unread = 0;
+  renderChatBadge();
+  S.lastEvent = '';
+  resetPlacement();
+  lobbyMsg('');
+  showScreen('game');
+  scrollTo(0, 0);
+  render();
+}
+
+function startSession({ code, role, token, create = false, isNew = false }) {
   teardown();
-  S.role = role;
   S.code = code;
-  S.token = randomToken();
-  S.phase = phase;
-  S.myName = myName();
-  setLobbyBusy(true);
+  S.role = role;
+  S.token = token;
+  S.create = create;
+  S.isNew = isNew;
+  enterGameScreen();
+}
+
+function openGame(entry) {
+  startSession(entry);
   connect();
 }
 
 function createGame() {
-  lobbyMsg('Creando partida…');
-  startSession('host', randomCode(), 'creating');
+  startSession({ code: randomCode(), role: 'host', token: randomToken(), create: true, isNew: true });
+  connect();
 }
 
-function joinGame(raw) {
+function joinGame(raw, { askName = false } = {}) {
   const code = normalizeCode(raw);
   if (code.length !== CODE_LENGTH) {
     lobbyMsg(`El código tiene ${CODE_LENGTH} caracteres.`, true);
     return;
   }
-  lobbyMsg('Conectando…');
-  startSession('guest', code, 'joining');
+  const saved = findGame(code);
+  if (saved) {
+    openGame(saved);
+    return;
+  }
+  startSession({ code, role: 'guest', token: randomToken(), isNew: true });
+  if (askName) {
+    // El rival te ve recién cuando elegís el nombre.
+    S.askName = true;
+    render();
+    openNameDialog();
+    return;
+  }
+  connect();
 }
 
-function enterGame() {
-  setLobbyBusy(false);
-  lobbyMsg('');
-  els.chatLog.replaceChildren();
-  S.unread = 0;
-  renderChatBadge();
-  openChat(false);
-  showScreen('game');
-  resetRound();
-  // Si vamos a preguntar el nombre, el rival se entera recién cuando lo elegís.
-  if (!S.askName) send({ type: 'hello', name: S.myName });
-  addChat(null, S.role === 'guest' && !S.peerOnline
-    ? 'Entraste a la partida. Ubicá tus barcos mientras vuelve tu amigo.'
-    : 'Conectado. Ubicá tus barcos.');
-  renderNet();
-  if (S.askName) openNameDialog();
+function goHome() {
+  teardown();
+  hideOverlay();
+  els.nameDialog.hidden = true;
+  hideChatToast();
+  zoomMyBoard(false);
+  history.replaceState(null, '', location.pathname);
+  showScreen('lobby');
+  updateTitle();
+  refreshGames();
 }
 
-// Cambiar el nombre en medio de la partida: se guarda y se le avisa al rival.
+function failToLobby(message) {
+  goHome();
+  lobbyMsg(message, true);
+}
+
+// Cambiar el nombre (también en medio de la partida): se guarda y se le avisa al rival.
 function openNameDialog() {
   els.nameEdit.value = els.name.value;
   els.nameDialog.hidden = false;
@@ -1176,148 +1331,18 @@ els.nameForm.addEventListener('submit', (e) => {
   els.nameDialog.hidden = true;
   els.name.value = els.nameEdit.value;
   const name = myName();
-  if (name === S.myName && !S.askName) return;
-  S.askName = false;
-  S.myName = name;
-  if (S.code) send({ type: 'hello', name });
-  render();
-});
-
-function onData(msg) {
-  if (!msg || typeof msg !== 'object') return;
-  // El rival entró mientras no estábamos conectados.
-  if (S.phase === 'waiting') enterGame();
-  switch (msg.type) {
-    case 'hello': {
-      const name = cleanName(msg.name);
-      if (!S.heardFromEnemy) addChat(null, `Jugás contra ${name}.`);
-      else if (name !== S.enemyName) addChat(null, `${S.enemyName} ahora se llama ${name}.`);
-      S.enemyName = name;
-      S.heardFromEnemy = true;
-      render();
-      renderNet();
-      break;
-    }
-    case 'ready':
-      if (S.phase !== 'placing') return;
-      S.enemyReady = true;
-      addChat(null, `${S.enemyName} tiene su flota lista.`);
-      maybeStart();
-      render();
-      break;
-    case 'start':
-      if (S.role === 'guest' && S.phase === 'placing') startBattle(msg.first === 'guest');
-      break;
-    case 'shot':
-      handleShot(msg);
-      break;
-    case 'result':
-      handleResult(msg);
-      break;
-    case 'reveal':
-      handleReveal(msg);
-      break;
-    case 'chat':
-      if (typeof msg.text === 'string' && msg.text.trim()) addChat(S.enemyName, msg.text.trim().slice(0, 200));
-      break;
-    case 'rematch':
-      if (S.phase !== 'over') return;
-      S.rematchEnemy = true;
-      addChat(null, `${S.enemyName} quiere la revancha.`);
-      maybeRematch();
-      render();
-      break;
-    case 'bye':
-      onPeerLeft();
-      break;
+  if (S.askName) {
+    S.askName = false;
+    connect();
+    render();
+    return;
   }
-}
-
-function onPeerLeft() {
-  if (!['placing', 'playing', 'over'].includes(S.phase)) return;
-  const wasOver = S.phase === 'over';
-  const enemy = S.enemyName;
-  S.phase = 'closed';
-  teardown({ keepState: true });
-  addChat(null, `${enemy} salió de la partida.`);
-  showOverlay(
-    `${enemy} salió`,
-    wasOver ? `${enemy} dejó la partida.` : `${enemy} abandonó la partida, así que no puede continuar.`,
-    [{ label: 'Volver al inicio', primary: true, onClick: leave }],
-  );
-}
-
-function teardown({ keepState = false } = {}) {
-  clearTimeout(S.retryTimer);
-  stopPing();
-  const ws = S.ws;
-  S.ws = null;
-  S.wsReady = false;
-  S.code = null;
-  try { ws?.close(); } catch { /* ya cerrada */ }
-  S.token = null;
-  S.outSeq = 0;
-  S.outbox = [];
-  S.inSeq = 0;
-  S.peerOnline = false;
-  S.failures = 0;
-  if (keepState) return;
-  S.heardFromEnemy = false;
-  S.role = null;
-  S.enemyName = 'Rival';
-  S.phase = 'lobby';
-}
-
-function failToLobby(message) {
-  teardown();
-  setLobbyBusy(false);
-  hideOverlay();
-  showScreen('lobby');
-  lobbyMsg(message, true);
-}
-
-function leave() {
-  // Avisa al rival y le da un instante al mensaje para salir antes de cerrar.
-  if (socketOpen()) {
-    send({ type: 'bye' });
-    const ws = S.ws;
-    S.ws = null;
-    setTimeout(() => { try { ws.close(); } catch { /* ya cerrada */ } }, 300);
-  }
-  teardown();
-  hideOverlay();
-  els.nameDialog.hidden = true;
-  hideChatToast();
-  setLobbyBusy(false);
-  lobbyMsg('');
-  history.replaceState(null, '', location.pathname);
-  showScreen('lobby');
-  updateTitle();
-}
-
-// Al cerrar la pestaña (no al cambiar de app) se avisa al rival que no vamos a volver.
-window.addEventListener('pagehide', (e) => {
-  if (!e.persisted && socketOpen()) send({ type: 'bye' });
+  if (S.view && name !== S.view.myName) send({ t: 'name', name });
 });
 
-// ---------------------------------------------------------------------------
-// Inicio
-// ---------------------------------------------------------------------------
-
-function inviteLink() {
-  return `${location.origin}${location.pathname}?c=${S.code}`;
+function inviteLink(code = S.code) {
+  return `${location.origin}${location.pathname}?c=${code}`;
 }
-
-els.btnCreate.addEventListener('click', () => createGame());
-els.joinForm.addEventListener('submit', (e) => {
-  e.preventDefault();
-  joinGame(els.joinCode.value);
-});
-els.joinCode.addEventListener('input', () => {
-  els.joinCode.value = normalizeCode(els.joinCode.value);
-});
-els.btnCancel.addEventListener('click', leave);
-els.btnLobbyCancel.addEventListener('click', leave);
 
 els.btnCopy.addEventListener('click', async () => {
   const link = inviteLink();
@@ -1341,14 +1366,358 @@ if (navigator.share) {
   });
 }
 
-els.name.value = storageGet('bn-name') || '';
+els.btnCreate.addEventListener('click', () => {
+  myName();
+  createGame();
+});
+els.joinForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  myName();
+  joinGame(els.joinCode.value);
+});
+els.joinCode.addEventListener('input', () => {
+  els.joinCode.value = normalizeCode(els.joinCode.value);
+});
 
-// Con un link de invitación se entra directo a la partida; si todavía no
-// tenemos tu nombre, se pregunta ya adentro.
-const invitedCode = normalizeCode(new URLSearchParams(location.search).get('c'));
-if (invitedCode.length === CODE_LENGTH) {
-  els.joinCode.value = invitedCode;
-  els.btnJoin.classList.add('primary');
-  S.askName = !els.name.value;
-  joinGame(invitedCode);
+// ---------------------------------------------------------------------------
+// Pantalla «Mis partidas»
+// ---------------------------------------------------------------------------
+
+let summaries = new Map(); // code -> resumen del servidor
+let homeTimer = 0;
+
+function gameStatus(g, s) {
+  if (!s) return { text: '…', mine: false };
+  if (s.gone) return { text: 'Ya no existe', mine: false, gone: true };
+  const rival = s.enemyName || 'tu rival';
+  if (!s.enemyJoined) return { text: `Esperando que entre tu amigo · código ${g.code}`, mine: false };
+  switch (s.phase) {
+    case 'placing':
+      if (!s.myReady) return { text: '🚢 Ubicá tus barcos', mine: true };
+      return { text: `Esperando que ${rival} ubique sus barcos`, mine: false };
+    case 'playing':
+      return s.myTurn ? { text: '🎯 Te toca', mine: true } : { text: `Turno de ${rival}`, mine: false };
+    case 'over': {
+      const result = s.winner === 'me' ? '🏆 Ganaste' : (s.endReason === 'abandon' ? 'Abandonaste' : 'Perdiste');
+      if (s.enemyLeft) return { text: `${result} · ${rival} dejó la partida`, mine: false, over: true };
+      if (s.rematchEnemy && !s.rematchMe) return { text: `${result} · ${rival} quiere la revancha`, mine: true, over: true };
+      return { text: result, mine: false, over: true };
+    }
+    default:
+      return { text: '', mine: false };
+  }
+}
+
+function renderGames() {
+  const games = loadGames();
+  const rows = games.map((g) => ({ g, s: summaries.get(g.code) }))
+    .map((r) => ({ ...r, st: gameStatus(r.g, r.s) }))
+    .sort((a, b) => (b.st.mine - a.st.mine) || ((b.s?.updatedAt || b.g.addedAt) - (a.s?.updatedAt || a.g.addedAt)));
+  els.gamesEmpty.hidden = games.length > 0;
+  els.gamesList.replaceChildren(...rows.map(({ g, s, st }) => {
+    const li = document.createElement('li');
+    li.className = 'game-row';
+    if (st.mine) li.classList.add('mine');
+    if (st.gone || st.over) li.classList.add('done');
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'game-open';
+    const title = document.createElement('span');
+    title.className = 'g-title';
+    title.textContent = `vs. ${s?.enemyName || g.enemyName || '(esperando rival)'}`;
+    const status = document.createElement('span');
+    status.className = 'g-status';
+    status.textContent = st.text;
+    open.append(title, status);
+    open.addEventListener('click', () => {
+      if (st.gone) {
+        removeGame(g.code);
+        renderGames();
+        return;
+      }
+      openGame(g);
+    });
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'g-remove ghost small';
+    remove.textContent = '✕';
+    remove.setAttribute('aria-label', `Quitar la partida contra ${s?.enemyName || g.enemyName || 'tu rival'}`);
+    remove.addEventListener('click', () => quitGame(g, s));
+    li.append(open, remove);
+    return li;
+  }));
+  updateAppBadge(rows.filter((r) => r.st.mine && !r.st.over).length);
+}
+
+async function refreshGames() {
+  clearTimeout(homeTimer);
+  renderGames();
+  renderPushCard();
+  const games = loadGames();
+  if (games.length) {
+    try {
+      const { games: list } = await postJson('/api/games/summary', { games: games.map(({ code, token }) => ({ code, token })) });
+      summaries = new Map(list.map((s) => [s.code, s]));
+      for (const s of list) {
+        if (s.enemyName) upsertGame({ code: s.code, enemyName: s.enemyName });
+      }
+      if (!els.screens.lobby.hidden) renderGames();
+    } catch { /* sin conexión: queda lo que había */ }
+  }
+  if (!els.screens.lobby.hidden && !document.hidden) homeTimer = setTimeout(refreshGames, HOME_REFRESH_MS);
+}
+
+async function quitGame(g, s) {
+  const rival = s?.enemyName || g.enemyName || 'tu rival';
+  const active = s && !s.gone && s.enemyJoined && s.phase !== 'over';
+  if (s && !s.gone && !s.enemyJoined && !confirm('¿Borrar esta partida? Tu amigo ya no va a poder entrar.')) return;
+  if (active && !confirm(`¿Abandonar la partida contra ${rival}? Va a contar como que perdiste.`)) return;
+  if (s && !s.gone) {
+    try {
+      await postJson('/api/games/leave', { code: g.code, token: g.token });
+    } catch {
+      alert('No se pudo avisar al servidor. Revisá tu internet y probá de nuevo.');
+      return;
+    }
+  }
+  removeGame(g.code);
+  summaries.delete(g.code);
+  renderGames();
+}
+
+function updateAppBadge(count) {
+  try {
+    if (count > 0) navigator.setAppBadge?.(count)?.catch(() => {});
+    else navigator.clearAppBadge?.()?.catch(() => {});
+  } catch { /* no soportado */ }
+}
+
+// ---------------------------------------------------------------------------
+// Pasar las partidas a otro dispositivo
+// ---------------------------------------------------------------------------
+// El link lleva los tokens de tus partidas: quien lo abra puede jugarlas.
+
+function exportLink() {
+  const data = { n: els.name.value.trim(), g: loadGames().map((g) => [g.code, g.role, g.token, g.enemyName || '']) };
+  return `${location.origin}${location.pathname}#importar=${b64urlEncode(new TextEncoder().encode(JSON.stringify(data)))}`;
+}
+
+els.btnTransfer.addEventListener('click', () => {
+  if (!loadGames().length) {
+    lobbyMsg('Todavía no tenés partidas para pasar.');
+    return;
+  }
+  const link = exportLink();
+  const actions = [
+    {
+      label: 'Copiar link',
+      primary: true,
+      onClick: async (e) => {
+        try {
+          await navigator.clipboard.writeText(link);
+          e.target.textContent = '¡Copiado!';
+        } catch {
+          prompt('Copiá este link:', link);
+        }
+      },
+    },
+    { label: 'Cerrar', onClick: hideOverlay },
+  ];
+  if (navigator.share) {
+    actions.splice(1, 0, {
+      label: 'Compartir…',
+      onClick: () => navigator.share({ title: 'Mis partidas de Batalla Naval', url: link }).catch(() => {}),
+    });
+  }
+  showOverlay(
+    'Pasar tus partidas',
+    'Abrí este link en el otro dispositivo y vas a poder seguir tus partidas desde los dos. Mandátelo sólo a vos: cualquiera que lo tenga puede jugar en tu lugar.',
+    actions,
+  );
+});
+
+function importFromHash() {
+  const m = location.hash.match(/^#importar=([A-Za-z0-9_-]+)$/);
+  if (!m) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  try {
+    const data = JSON.parse(new TextDecoder().decode(b64urlDecode(m[1])));
+    let added = 0;
+    for (const item of data.g || []) {
+      const [code, role, token, enemyName] = item;
+      if (normalizeCode(code).length !== CODE_LENGTH || !['host', 'guest'].includes(role) || typeof token !== 'string') continue;
+      if (findGame(code)) continue;
+      upsertGame({ code, role, token, enemyName: String(enemyName || '') });
+      added++;
+    }
+    if (data.n && !els.name.value) {
+      els.name.value = String(data.n).slice(0, 20);
+      myName();
+    }
+    let msg = 'Esas partidas ya estaban en este dispositivo.';
+    if (added === 1) msg = 'Listo: se agregó 1 partida.';
+    else if (added > 1) msg = `Listo: se agregaron ${added} partidas.`;
+    lobbyMsg(msg);
+  } catch {
+    lobbyMsg('El link para pasar partidas no es válido.', true);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Avisos (notificaciones push)
+// ---------------------------------------------------------------------------
+
+const pushSupported = 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+let swReady = null;
+
+if ('serviceWorker' in navigator) {
+  swReady = navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).catch(() => null);
+  // Al tocar una notificación con el juego ya abierto: ir a esa partida.
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data?.type !== 'open') return;
+    const code = normalizeCode(new URL(e.data.url, location.href).searchParams.get('c'));
+    if (code.length === CODE_LENGTH && code !== S.code) {
+      const saved = findGame(code);
+      if (saved) openGame(saved);
+    }
+  });
+}
+
+async function currentSubscription() {
+  if (!pushSupported || !swReady) return null;
+  const reg = await swReady;
+  return reg ? reg.pushManager.getSubscription() : null;
+}
+
+async function serverKey() {
+  const res = await fetch('/api/push/key');
+  return (await res.json()).key;
+}
+
+function sameKey(sub, keyB64) {
+  const k = sub.options?.applicationServerKey;
+  if (!k) return true;
+  return b64urlEncode(new Uint8Array(k)) === keyB64;
+}
+
+async function enablePush() {
+  if (!pushSupported) return;
+  const permission = await Notification.requestPermission();
+  if (permission !== 'granted') {
+    renderPushCard();
+    renderPushOffer();
+    return;
+  }
+  try {
+    const reg = await swReady;
+    const keyB64 = await serverKey();
+    let sub = await reg.pushManager.getSubscription();
+    if (sub && !sameKey(sub, keyB64)) {
+      await sub.unsubscribe();
+      sub = null;
+    }
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64urlDecode(keyB64) });
+    await syncPushAll(sub);
+    S.pushOn = true;
+    storageSet('bn-push', '1');
+  } catch {
+    alert('No se pudieron activar los avisos. Probá de nuevo más tarde.');
+  }
+  renderPushCard();
+  if (!els.screens.game.hidden) render();
+}
+
+async function disablePush() {
+  const sub = await currentSubscription();
+  try { await sub?.unsubscribe(); } catch { /* ya estaba */ }
+  S.pushOn = false;
+  storageSet('bn-push', '0');
+  const games = loadGames().map(({ code, token }) => ({ code, token }));
+  if (games.length) postJson('/api/games/push', { games, sub: null }).catch(() => {});
+  renderPushCard();
+}
+
+// Le pasa la suscripción a todas tus partidas (así el servidor sabe a dónde avisar).
+async function syncPushAll(sub) {
+  const games = loadGames().map(({ code, token }) => ({ code, token }));
+  if (games.length) await postJson('/api/games/push', { games, sub: sub.toJSON() });
+  if (socketOpen()) send({ t: 'push', sub: sub.toJSON() });
+}
+
+async function syncPushForCurrent() {
+  const sub = await currentSubscription();
+  if (sub && socketOpen()) send({ t: 'push', sub: sub.toJSON() });
+}
+
+function renderPushCard() {
+  let text;
+  let canEnable = false;
+  if (S.pushOn) {
+    text = '🔔 Avisos activados: te llega una notificación cuando te toca, aunque tengas el juego cerrado.';
+  } else if (!pushSupported && isIOS && !standalone) {
+    text = '🔔 Para recibir avisos en iPhone: tocá Compartir y después «Agregar a inicio». Abrí el juego desde ese ícono y activá los avisos.';
+  } else if (!pushSupported) {
+    text = 'Este navegador no permite avisos. Vas a ver tus turnos al entrar al juego.';
+  } else if (Notification.permission === 'denied') {
+    text = 'Bloqueaste los avisos para este sitio. Para recibirlos, permitilos desde la configuración del navegador.';
+  } else {
+    text = '🔔 Activá los avisos y te llega una notificación cuando te toque, aunque tengas el juego cerrado.';
+    canEnable = true;
+  }
+  els.pushText.textContent = text;
+  els.btnPush.hidden = !canEnable;
+  els.btnPushOff.hidden = !S.pushOn;
+  els.pushActions.hidden = !canEnable && !S.pushOn;
+}
+
+// En la partida, ofrecer los avisos cuando tiene sentido: te toca esperar al rival.
+function renderPushOffer() {
+  const v = V();
+  const waiting = v && (!v.enemyJoined || v.myReady) && v.phase !== 'over' && !(v.phase === 'playing' && v.myTurn);
+  els.pushOffer.hidden = !(waiting && pushSupported && !S.pushOn
+    && Notification.permission === 'default' && storageGet('bn-push-dismissed') !== '1');
+}
+
+els.btnPush.addEventListener('click', enablePush);
+els.btnPushOff.addEventListener('click', disablePush);
+els.btnPushOffer.addEventListener('click', enablePush);
+els.btnPushDismiss.addEventListener('click', () => {
+  storageSet('bn-push-dismissed', '1');
+  renderPushOffer();
+});
+
+// Al abrir: si los avisos estaban activados, se confirma la suscripción (puede
+// haber cambiado) y se reparte a todas las partidas.
+async function initPush() {
+  const sub = await currentSubscription();
+  S.pushOn = !!sub && Notification.permission === 'granted';
+  if (S.pushOn) {
+    try {
+      const keyB64 = await serverKey();
+      if (sameKey(sub, keyB64)) await syncPushAll(sub);
+      else S.pushOn = false;
+    } catch { /* sin conexión */ }
+  }
+  renderPushCard();
+  if (!els.screens.game.hidden) render();
+}
+
+// ---------------------------------------------------------------------------
+// Inicio
+// ---------------------------------------------------------------------------
+
+els.name.value = storageGet('bn-name') || '';
+importFromHash();
+renderPushCard();
+initPush();
+
+// ?c=CÓDIGO: link de invitación o una partida tuya (por ejemplo, desde una notificación).
+const linkCode = normalizeCode(new URLSearchParams(location.search).get('c'));
+if (linkCode.length === CODE_LENGTH) {
+  els.joinCode.value = linkCode;
+  joinGame(linkCode, { askName: !els.name.value });
+} else {
+  refreshGames();
 }

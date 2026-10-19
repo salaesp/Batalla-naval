@@ -6,45 +6,49 @@
   <title>Batalla Naval</title>
   <meta name="description" content="Batalla naval online para jugar con un amigo: creá una partida y compartí el código.">
   <meta name="theme-color" content="#0b1d2e">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚓</text></svg>">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="manifest" href="manifest.webmanifest">
   <link rel="stylesheet" href="style.css">
   <script src="game.js" defer></script>
 </head>
 <body>
   <main>
-    <!-- Inicio -->
+    <!-- Inicio: tus partidas -->
     <section id="lobby" class="screen">
       <header class="hero">
         <h1>⚓ Batalla Naval</h1>
-        <p>Creá una partida, pasale el código a un amigo y ¡a hundir barcos!</p>
+        <p>Creá una partida, pasale el link a un amigo y jueguen cuando quieran: cada uno dispara en su turno.</p>
       </header>
       <div class="card">
         <label for="name">Tu nombre</label>
         <input id="name" maxlength="20" placeholder="Capitán" autocomplete="nickname">
-        <button id="btn-create" class="primary big">Crear partida</button>
+        <button id="btn-create" class="primary big">Nueva partida</button>
         <div class="sep"><span>o unite con un código</span></div>
         <form id="join-form" class="row">
           <input id="join-code" class="code-input" maxlength="5" placeholder="CÓDIGO" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Código de partida">
           <button type="submit" id="btn-join">Unirse</button>
         </form>
         <p id="lobby-msg" class="msg" role="status"></p>
-        <button id="btn-lobby-cancel" class="ghost small" hidden>Cancelar</button>
       </div>
-    </section>
 
-    <!-- Esperando rival -->
-    <section id="waiting" class="screen" hidden>
-      <div class="card center">
-        <p>Compartí este código con tu amigo:</p>
-        <div id="code-display" class="code">-----</div>
-        <div class="row center">
-          <button id="btn-copy">Copiar link</button>
-          <button id="btn-share" hidden>Compartir…</button>
+      <section class="games" aria-labelledby="games-title">
+        <h2 id="games-title">Mis partidas</h2>
+        <ul id="games-list" class="games-list"></ul>
+        <p id="games-empty" class="muted center">Todavía no tenés partidas. Creá una y mandale el link a alguien.</p>
+      </section>
+
+      <div id="push-card" class="card push-card">
+        <p id="push-text"></p>
+        <div id="push-actions" class="row wrap">
+          <button id="btn-push" class="primary" hidden>Activar avisos</button>
+          <button id="btn-push-off" class="ghost small" hidden>Desactivar avisos</button>
         </div>
-        <p class="muted"><span class="spinner"></span> <span id="waiting-note">Esperando que se una…</span></p>
-        <p class="hint">Cuando tu amigo entre, la partida arranca sola. Podés cambiar de app para mandarle el código; sólo no cierres esta pestaña.</p>
-        <button id="btn-cancel" class="ghost">Cancelar</button>
       </div>
+
+      <p class="center">
+        <button id="btn-transfer" class="ghost small">Pasar mis partidas a otro dispositivo</button>
+      </p>
     </section>
 
     <!-- Partida -->
@@ -52,7 +56,7 @@
       <div class="topbar">
         <div class="vs">
           <button type="button" id="btn-name" class="name-btn" title="Cambiar tu nombre"></button>
-          <span class="muted">vs.</span> <strong id="enemy-name"></strong>
+          <span class="muted">vs.</span> <strong id="enemy-name"></strong><span id="peer-dot" class="peer-dot" hidden title="En línea"></span>
           <span class="muted">· Partida <span id="game-code"></span></span>
         </div>
         <div class="row">
@@ -60,10 +64,27 @@
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/></svg>
             <span id="chat-badge" class="chat-badge" hidden></span>
           </button>
-          <button id="btn-leave" class="ghost small">Salir</button>
+          <button id="btn-leave" class="ghost small">← Partidas</button>
         </div>
       </div>
       <p id="net-banner" class="net-banner" role="alert" hidden></p>
+
+      <div id="invite" class="invite" hidden>
+        <p>Invitá a tu amigo con este código: <strong id="invite-code" class="code-sm"></strong></p>
+        <div class="row wrap">
+          <button id="btn-copy">Copiar link</button>
+          <button id="btn-share" hidden>Compartir…</button>
+        </div>
+        <p class="hint">Puede entrar cuando quiera. Mientras tanto, ubicá tus barcos.</p>
+      </div>
+
+      <p id="push-offer" class="push-offer" hidden>
+        <span>¿Te aviso cuando te toque, aunque cierres el juego?</span>
+        <span class="row">
+          <button id="btn-push-offer" class="primary small">Activar avisos</button>
+          <button id="btn-push-dismiss" class="ghost small">Ahora no</button>
+        </span>
+      </p>
       <p id="status" class="status" role="status" aria-live="polite"></p>
 
       <div id="placement" class="panel">
@@ -78,7 +99,7 @@
 
       <div id="end-actions" class="panel row wrap center" hidden>
         <button id="btn-rematch" class="primary">Revancha</button>
-        <button id="btn-home" class="ghost">Volver al inicio</button>
+        <button id="btn-home" class="ghost">Volver a mis partidas</button>
       </div>
 
       <div id="boards" class="boards">

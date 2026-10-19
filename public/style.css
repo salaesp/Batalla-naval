@@ -104,7 +104,7 @@ kbd {
 .hero h1 { font-size: clamp(2rem, 8vw, 3rem); }
 .hero p { color: var(--muted); margin: 8px 0 0; }
 
-#lobby .card, #waiting .card { max-width: 420px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+#lobby .card { max-width: 420px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
 #lobby label { font-size: .9rem; color: var(--muted); margin-bottom: -6px; }
 #join-form input { flex: 1; }
 .code-input { text-transform: uppercase; letter-spacing: .3em; font-weight: 700; text-align: center; }
@@ -115,32 +115,76 @@ kbd {
 .msg { min-height: 1.4em; margin: 0; font-size: .9rem; color: var(--muted); }
 .msg.error { color: var(--danger); }
 
-#waiting { padding-top: 48px; }
 .hint { margin: 0; font-size: .85rem; color: var(--muted); opacity: .8; }
-#btn-lobby-cancel { align-self: center; }
-.code {
-  font-size: clamp(2.4rem, 12vw, 3.5rem);
-  font-weight: 800;
-  letter-spacing: .25em;
-  padding-left: .25em;
+
+/* Mis partidas */
+.games { max-width: 420px; margin: 24px auto 0; }
+.games h2 { font-size: 1.05rem; color: var(--text); margin-bottom: 10px; }
+.games-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.game-row {
+  display: flex;
+  align-items: stretch;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.game-row.mine { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(255, 201, 74, .25); }
+.game-row.done { opacity: .7; }
+.game-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  padding: 12px 14px;
+}
+.g-title { font-weight: 700; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.g-status { font-size: .9rem; color: var(--muted); }
+.game-row.mine .g-status { color: var(--accent); font-weight: 600; }
+.g-remove { border: 0; border-left: 1px solid var(--line); border-radius: 0; color: var(--muted); min-width: 48px; }
+#lobby .push-card { max-width: 420px; margin: 24px auto 0; display: flex; flex-direction: column; gap: 10px; }
+.push-card p { margin: 0; font-size: .95rem; }
+#btn-transfer { margin-top: 16px; color: var(--muted); }
+
+/* Invitación y oferta de avisos dentro de la partida */
+.invite, .push-offer {
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px dashed var(--accent);
+  background: rgba(255, 201, 74, .06);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.invite p { margin: 0; }
+.code-sm {
   color: var(--accent);
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  letter-spacing: .15em;
+  font-size: 1.15rem;
   user-select: all;
 }
-
-.spinner {
+.push-offer { border-style: solid; border-color: var(--line); background: rgba(255, 255, 255, .04); font-size: .95rem; }
+.peer-dot {
   display: inline-block;
-  width: 12px; height: 12px;
-  border: 2px solid var(--muted);
-  border-top-color: transparent;
+  width: 8px;
+  height: 8px;
+  margin-left: 6px;
   border-radius: 50%;
-  animation: spin 1s linear infinite;
-  vertical-align: -1px;
+  background: var(--ok);
+  vertical-align: 1px;
 }
-@keyframes spin { to { transform: rotate(360deg); } }
 
 /* Partida */
 .topbar { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+#btn-leave { white-space: nowrap; }
 .vs { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .name-btn {
   background: transparent;
